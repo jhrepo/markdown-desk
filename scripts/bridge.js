@@ -122,15 +122,32 @@
           if (confirmed) {
             try {
               await update.downloadAndInstall();
-              if (window.__TAURI__.process) {
-                await window.__TAURI__.process.restart();
+              // Ask user to restart
+              if (window.__TAURI__.dialog) {
+                var doRestart = await window.__TAURI__.dialog.confirm(
+                  'Update installed. Restart now?',
+                  { title: 'Update Complete', kind: 'info' }
+                );
+                if (doRestart && window.__TAURI__.process) {
+                  // Try both API names
+                  var proc = window.__TAURI__.process;
+                  if (typeof proc.relaunch === 'function') {
+                    await proc.relaunch();
+                  } else if (typeof proc.restart === 'function') {
+                    await proc.restart();
+                  } else if (typeof proc.exit === 'function') {
+                    await proc.exit(0);
+                  }
+                }
               }
             } catch (dlErr) {
               console.log('[updater] Download failed:', dlErr);
-              await window.__TAURI__.dialog.message(
-                'Update download failed: ' + dlErr,
-                { title: 'Update Error' }
-              );
+              if (window.__TAURI__ && window.__TAURI__.dialog) {
+                await window.__TAURI__.dialog.message(
+                  'Update failed: ' + dlErr,
+                  { title: 'Update Error' }
+                );
+              }
             }
           }
         }
