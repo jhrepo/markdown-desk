@@ -5,6 +5,10 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuild
 pub(crate) const JS_CHECK_UPDATE: &str =
     "if(typeof checkForUpdates==='function')checkForUpdates();";
 
+/// JS to save the active tab's content to its original file.
+pub(crate) const JS_SAVE_FILE: &str =
+    "(function(){var t=document.querySelector('#tab-list .tab-item.active .tab-title');var e=document.getElementById('markdown-editor');if(t&&e&&window.__TAURI_INTERNALS__){window.__TAURI_INTERNALS__.invoke('save_file',{title:t.textContent.trim(),content:e.value})}})();";
+
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let check_update_item = MenuItemBuilder::with_id("check_update", "Check for Updates...")
         .build(app)?;
@@ -21,8 +25,13 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
         .accelerator("CmdOrCtrl+O")
         .build(app)?;
 
+    let save_item = MenuItemBuilder::with_id("save", "Save")
+        .accelerator("CmdOrCtrl+S")
+        .build(app)?;
+
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&open_item)
+        .item(&save_item)
         .build()?;
 
     let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -53,6 +62,11 @@ pub fn setup_menu_events(app: &tauri::AppHandle) {
         if event.id() == "open" {
             dbg_log!("[menu] Open clicked");
             crate::commands::open_file_and_watch(&app_handle);
+        } else if event.id() == "save" {
+            dbg_log!("[menu] Save clicked");
+            if let Some(ww) = app_handle.get_webview_window("main") {
+                let _ = ww.eval(JS_SAVE_FILE);
+            }
         } else if event.id() == "check_update" {
             dbg_log!("[menu] Check for Updates clicked");
             if let Some(ww) = app_handle.get_webview_window("main") {
@@ -82,6 +96,34 @@ mod tests {
         // Should be safe to eval — no unclosed braces or syntax issues
         assert!(!JS_CHECK_UPDATE.contains('\n'));
         assert!(JS_CHECK_UPDATE.ends_with(';'));
+    }
+
+    #[test]
+    fn js_save_file_reads_active_tab() {
+        assert!(JS_SAVE_FILE.contains(".tab-item.active .tab-title"));
+        assert!(JS_SAVE_FILE.contains("markdown-editor"));
+    }
+
+    #[test]
+    fn js_save_file_calls_save_command() {
+        assert!(JS_SAVE_FILE.contains("invoke('save_file'"));
+    }
+
+    #[test]
+    fn js_save_file_is_iife() {
+        assert!(JS_SAVE_FILE.starts_with("(function()"));
+        assert!(JS_SAVE_FILE.ends_with(";"));
+    }
+
+    #[test]
+    fn js_save_file_has_tauri_guard() {
+        assert!(JS_SAVE_FILE.contains("__TAURI_INTERNALS__"));
+    }
+
+    #[test]
+    fn js_save_file_sends_title_and_content() {
+        assert!(JS_SAVE_FILE.contains("title:"));
+        assert!(JS_SAVE_FILE.contains("content:"));
     }
 
     #[test]

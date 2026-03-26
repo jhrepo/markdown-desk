@@ -141,6 +141,25 @@
 
   // --- Keyboard shortcuts ---
 
+  // Cmd+S → save to original file
+  document.addEventListener('keydown', function(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (window.__TAURI_INTERNALS__) {
+        var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
+        var title = activeEl ? activeEl.textContent.trim() : '';
+        var editor = document.getElementById('markdown-editor');
+        if (title && editor) {
+          window.__TAURI_INTERNALS__.invoke('save_file', {
+            title: title,
+            content: editor.value
+          });
+        }
+      }
+    }
+  }, true);
+
   // Cmd+O → native file dialog
   document.addEventListener('keydown', function(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'o') {

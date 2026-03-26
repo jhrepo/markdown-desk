@@ -217,6 +217,22 @@ mod tests {
         assert_eq!(path_for_title(&state, "b"), Some(path_b));
     }
 
+    #[test]
+    fn path_for_title_empty_string() {
+        let state = WatcherState::new();
+        state.files.lock().unwrap().insert("test.md".to_string(), PathBuf::from("/tmp/test.md"));
+        assert_eq!(path_for_title(&state, ""), None);
+    }
+
+    #[test]
+    fn path_for_title_case_sensitive() {
+        let state = WatcherState::new();
+        state.files.lock().unwrap().insert("Test.md".to_string(), PathBuf::from("/tmp/Test.md"));
+        // 대소문자 구분
+        assert_eq!(path_for_title(&state, "test"), None);
+        assert_eq!(path_for_title(&state, "Test"), Some(PathBuf::from("/tmp/Test.md")));
+    }
+
     // --- now_millis tests ---
 
     #[test]

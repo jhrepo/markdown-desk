@@ -187,6 +187,20 @@ pub fn refresh_active_tab(app: tauri::AppHandle, title: String) {
     }
 }
 
+/// Tauri IPC command — save editor content to the file matching the active tab.
+#[tauri::command]
+pub fn save_file(app: tauri::AppHandle, title: String, content: String) {
+    let state = app.state::<WatcherState>();
+    let Some(path) = crate::watcher::path_for_title(&state, &title) else {
+        dbg_log!("[save] No watched file for tab: {}", title);
+        return;
+    };
+    match std::fs::write(&path, &content) {
+        Ok(_) => dbg_log!("[save] Saved: {}", path.display()),
+        Err(e) => dbg_log!("[save] Write error: {}", e),
+    }
+}
+
 pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")
@@ -379,6 +393,15 @@ mod tests {
     fn js_update_tab_escapes_filename() {
         let js = js_update_tab("content", "file`name.md");
         assert!(js.contains("file\\`name.md"));
+    }
+
+    #[test]
+    fn js_update_tab_filename_before_content() {
+        // filename is set first (var filename), then content (editor.value)
+        let js = js_update_tab("UNIQUE_CONTENT", "UNIQUE_FILE.md");
+        let fname_pos = js.find("UNIQUE_FILE.md").unwrap();
+        let content_pos = js.find("UNIQUE_CONTENT").unwrap();
+        assert!(fname_pos < content_pos);
     }
 
     // --- js_add_watched_path tests ---
