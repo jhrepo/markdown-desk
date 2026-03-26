@@ -1,0 +1,3 @@
+[submodule "Markdown-Viewer"]
+	path = Markdown-Viewer
+	url = https://github.com/ThisIs-Developer/Markdown-Viewer.git
