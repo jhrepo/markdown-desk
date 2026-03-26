@@ -101,29 +101,43 @@
   // --- Auto-update check (called on startup and from menu) ---
   // manual=true shows feedback even when no update is available
   window.checkForUpdates = function() { doCheckForUpdates(true); };
+  var _updateChecking = false;
   async function doCheckForUpdates(manual) {
+    if (_updateChecking) return;
+    _updateChecking = true;
     try {
       if (!window.__TAURI__ || !window.__TAURI__.updater) {
-        if (manual) alert('Update check is not available.');
+        if (manual && window.__TAURI__ && window.__TAURI__.dialog) {
+          await window.__TAURI__.dialog.message('Update check is not available.');
+        }
         return;
       }
       var update = await window.__TAURI__.updater.check();
       if (update) {
-        var confirmed = confirm(
-          'New version ' + update.version + ' is available. Update now?'
-        );
-        if (confirmed) {
-          await update.downloadAndInstall();
-          if (window.__TAURI__.process) {
-            await window.__TAURI__.process.restart();
+        if (window.__TAURI__.dialog) {
+          var confirmed = await window.__TAURI__.dialog.confirm(
+            'New version ' + update.version + ' is available. Update now?',
+            { title: 'Update Available', kind: 'info' }
+          );
+          if (confirmed) {
+            await update.downloadAndInstall();
+            if (window.__TAURI__.process) {
+              await window.__TAURI__.process.restart();
+            }
           }
         }
       } else if (manual) {
-        alert('You are using the latest version.');
+        if (window.__TAURI__.dialog) {
+          await window.__TAURI__.dialog.message('You are using the latest version.', { title: 'Markdown Desk' });
+        }
       }
     } catch (e) {
       console.log('[updater] Check failed:', e);
-      if (manual) alert('Failed to check for updates.');
+      if (manual && window.__TAURI__ && window.__TAURI__.dialog) {
+        await window.__TAURI__.dialog.message('Failed to check for updates.', { title: 'Error' });
+      }
+    } finally {
+      _updateChecking = false;
     }
   }
   // Auto-check on startup (silent, no feedback if up-to-date)
