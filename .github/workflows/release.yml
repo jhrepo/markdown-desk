@@ -40,6 +40,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target x86_64-apple-darwin
 
+      - name: Get submodule version
+        id: submodule
+        run: |
+          cd Markdown-Viewer
+          COMMIT=$(git rev-parse --short HEAD)
+          DESC=$(git describe --tags --always 2>/dev/null || echo "$COMMIT")
+          echo "version=$DESC" >> $GITHUB_OUTPUT
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+
       - name: Generate latest.json
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
@@ -50,7 +59,7 @@ jobs:
           cat > latest.json << EOF
           {
             "version": "${VERSION}",
-            "notes": "See https://github.com/${REPO}/releases/tag/${TAG}",
+            "notes": "Markdown-Viewer: ${{ steps.submodule.outputs.version }}. See https://github.com/${REPO}/releases/tag/${TAG}",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {
               "darwin-aarch64": {
@@ -70,6 +79,8 @@ jobs:
         with:
           draft: false
           generate_release_notes: true
+          body: |
+            **Markdown-Viewer**: `${{ steps.submodule.outputs.version }}` ([ThisIs-Developer/Markdown-Viewer@${{ steps.submodule.outputs.commit }}](https://github.com/ThisIs-Developer/Markdown-Viewer/commit/${{ steps.submodule.outputs.commit }}))
           files: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
