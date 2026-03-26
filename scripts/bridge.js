@@ -86,10 +86,14 @@
   });
 
   // --- Auto-update check (called on startup and from menu) ---
-  window.checkForUpdates = checkForUpdates;
-  async function checkForUpdates() {
+  // manual=true shows feedback even when no update is available
+  window.checkForUpdates = function() { doCheckForUpdates(true); };
+  async function doCheckForUpdates(manual) {
     try {
-      if (!window.__TAURI__ || !window.__TAURI__.updater) return;
+      if (!window.__TAURI__ || !window.__TAURI__.updater) {
+        if (manual) alert('Update check is not available.');
+        return;
+      }
       var update = await window.__TAURI__.updater.check();
       if (update) {
         var confirmed = confirm(
@@ -101,13 +105,16 @@
             await window.__TAURI__.process.restart();
           }
         }
+      } else if (manual) {
+        alert('You are using the latest version.');
       }
     } catch (e) {
       console.log('[updater] Check failed:', e);
+      if (manual) alert('Failed to check for updates.');
     }
   }
-  // Delay update check to not block app startup
-  setTimeout(checkForUpdates, 3000);
+  // Auto-check on startup (silent, no feedback if up-to-date)
+  setTimeout(function() { doCheckForUpdates(false); }, 3000);
 
   // --- Hard reload: clear all state except theme ---
   function hardReload() {

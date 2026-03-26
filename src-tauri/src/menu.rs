@@ -83,4 +83,12 @@ mod tests {
         assert!(!JS_CHECK_UPDATE.contains('\n'));
         assert!(JS_CHECK_UPDATE.ends_with(';'));
     }
+
+    #[test]
+    fn js_check_update_calls_window_function() {
+        // menu calls checkForUpdates() which is set on window by bridge.js
+        // This ensures the function name matches what bridge.js exposes
+        assert!(JS_CHECK_UPDATE.contains("checkForUpdates"));
+        assert!(!JS_CHECK_UPDATE.contains("doCheckForUpdates"));
+    }
 }
