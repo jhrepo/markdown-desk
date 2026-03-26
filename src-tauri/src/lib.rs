@@ -11,7 +11,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(watcher::WatcherState::new())
-        .invoke_handler(tauri::generate_handler![commands::native_open_file])
+        .invoke_handler(tauri::generate_handler![
+                commands::native_open_file,
+                commands::restore_watcher,
+                commands::refresh_active_tab
+            ])
         .setup(|app| {
             dbg_log!("Setup: building menu");
             let handle = app.handle();

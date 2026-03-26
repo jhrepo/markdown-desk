@@ -43,8 +43,11 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
             open_in_new_tab(&app_handle, &content, &filename);
 
             let state = app_handle.state::<WatcherState>();
-            match crate::watcher::start_watching(&app_handle, &state, path) {
-                Ok(_) => dbg_log!("[open] Watcher started"),
+            match crate::watcher::start_watching(&app_handle, &state, path.clone()) {
+                Ok(_) => {
+                    dbg_log!("[open] Watcher started");
+                    persist_watched_path(&app_handle, &path);
+                }
                 Err(e) => dbg_log!("[open] Watcher error: {}", e),
             }
         });
@@ -95,6 +98,10 @@ pub(crate) fn js_update_tab(content: &str) -> String {
             if (editor) {{
                 editor.value = `{}`;
                 editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                if (typeof tabs !== 'undefined' && typeof activeTabId !== 'undefined') {{
+                    var tab = tabs.find(function(t) {{ return t.id === activeTabId; }});
+                    if (tab) {{ tab.content = editor.value; }}
+                }}
                 setTimeout(function() {{
                     editor.scrollTop = 0;
                     var preview = document.getElementById('preview');
@@ -125,6 +132,53 @@ pub fn update_current_tab(app: &tauri::AppHandle, content: &str, filename: &str)
             Ok(_) => dbg_log!("[update] OK: {}", filename),
             Err(e) => dbg_log!("[update] Failed: {}", e),
         }
+    }
+}
+
+/// Generate JS to store a file path in localStorage.
+pub(crate) fn js_persist_watched_path(path: &str) -> String {
+    let escaped = escape_js(path);
+    format!("localStorage.setItem('markdown-desk-watched-path',`{}`);", escaped)
+}
+
+fn persist_watched_path(app: &tauri::AppHandle, path: &std::path::Path) {
+    if let Some(ww) = app.get_webview_window("main") {
+        let js = js_persist_watched_path(&path.to_string_lossy());
+        let _ = ww.eval(&js);
+    }
+}
+
+/// Tauri IPC command — called from bridge.js on app restart to restore file watching.
+#[tauri::command]
+pub fn restore_watcher(app: tauri::AppHandle, path: String) {
+    let path_buf = std::path::PathBuf::from(&path);
+    if !path_buf.exists() {
+        dbg_log!("[restore] File no longer exists: {}", path);
+        if let Some(ww) = app.get_webview_window("main") {
+            let _ = ww.eval("localStorage.removeItem('markdown-desk-watched-path');");
+        }
+        return;
+    }
+    let state = app.state::<WatcherState>();
+    match crate::watcher::start_watching(&app, &state, path_buf) {
+        Ok(_) => dbg_log!("[restore] Watcher restored for: {}", path),
+        Err(e) => dbg_log!("[restore] Watcher restore failed: {}", e),
+    }
+}
+
+/// Tauri IPC command — called from bridge.js on tab switch to refresh with latest file content.
+#[tauri::command]
+pub fn refresh_active_tab(app: tauri::AppHandle) {
+    let state = app.state::<WatcherState>();
+    let path = state.current_path.lock().unwrap().clone();
+    let Some(path) = path else { return };
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let filename = filename_from_path(&path);
+            update_current_tab(&app, &content, &filename);
+            dbg_log!("[refresh] Tab refreshed: {}", filename);
+        }
+        Err(e) => dbg_log!("[refresh] Read error: {}", e),
     }
 }
 
@@ -284,6 +338,68 @@ mod tests {
     fn js_update_tab_empty() {
         let js = js_update_tab("");
         assert!(js.contains("markdown-editor"));
+    }
+
+    #[test]
+    fn js_update_tab_syncs_tab_content() {
+        let js = js_update_tab("content");
+        assert!(js.contains("tab.content = editor.value"));
+        assert!(js.contains("activeTabId"));
+        assert!(js.contains("tabs.find"));
+    }
+
+    // --- js_persist_watched_path tests ---
+
+    #[test]
+    fn js_persist_watched_path_basic() {
+        let js = js_persist_watched_path("/Users/test/file.md");
+        assert!(js.contains("localStorage.setItem"));
+        assert!(js.contains("markdown-desk-watched-path"));
+        assert!(js.contains("/Users/test/file.md"));
+    }
+
+    #[test]
+    fn js_persist_watched_path_escapes_special() {
+        let js = js_persist_watched_path("/path/with `backtick`/file.md");
+        assert!(js.contains("\\`backtick\\`"));
+    }
+
+    #[test]
+    fn js_persist_watched_path_spaces() {
+        let js = js_persist_watched_path("/Users/test/my documents/file.md");
+        assert!(js.contains("my documents"));
+    }
+
+    #[test]
+    fn js_persist_watched_path_empty() {
+        let js = js_persist_watched_path("");
+        assert!(js.contains("markdown-desk-watched-path"));
+        assert!(js.contains("localStorage.setItem"));
+    }
+
+    #[test]
+    fn js_persist_watched_path_unicode() {
+        let js = js_persist_watched_path("/Users/홍길동/문서/메모.md");
+        assert!(js.contains("홍길동"));
+        assert!(js.contains("메모.md"));
+    }
+
+    #[test]
+    fn js_persist_watched_path_template_literal() {
+        let js = js_persist_watched_path("/path/${dir}/file.md");
+        // ${dir} should be escaped to \${dir}
+        assert!(js.contains("\\${dir}"));
+        // raw unescaped ${dir} should not appear (all occurrences are escaped)
+        assert_eq!(
+            js.matches("${dir}").count(),
+            js.matches("\\${dir}").count()
+        );
+    }
+
+    #[test]
+    fn js_persist_watched_path_correct_key() {
+        let js = js_persist_watched_path("/any/path.md");
+        assert!(js.starts_with("localStorage.setItem('markdown-desk-watched-path',"));
     }
 
     // --- escape_js edge cases ---

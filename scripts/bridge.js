@@ -55,6 +55,25 @@
       }, true);
     }
 
+    // Restore file watcher on app restart
+    var watchedPath = localStorage.getItem('markdown-desk-watched-path');
+    if (watchedPath && window.__TAURI_INTERNALS__) {
+      window.__TAURI_INTERNALS__.invoke('restore_watcher', { path: watchedPath });
+    }
+
+    // Refresh active tab with latest file content on tab switch
+    var tabList = document.getElementById('tab-list');
+    var mobileTabList = document.getElementById('mobile-tab-list');
+    function onTabClick() {
+      if (window.__TAURI_INTERNALS__) {
+        setTimeout(function() {
+          window.__TAURI_INTERNALS__.invoke('refresh_active_tab');
+        }, 50);
+      }
+    }
+    if (tabList) { tabList.addEventListener('click', onTabClick); }
+    if (mobileTabList) { mobileTabList.addEventListener('click', onTabClick); }
+
     // Override file-input click to use native dialog
     var fileInput = document.getElementById('file-input');
     if (fileInput) {
