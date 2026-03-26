@@ -1,6 +1,6 @@
 [package]
 name = "markdown-desk"
-version = "0.2613.2"
+version = "0.2613.3"
 edition = "2021"
 
 [dependencies]
