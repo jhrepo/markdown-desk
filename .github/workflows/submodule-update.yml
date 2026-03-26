@@ -1,0 +1,55 @@
+name: Check Submodule Update
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # Daily at 9:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Check for submodule updates
+        id: check
+        run: |
+          cd Markdown-Viewer
+          git fetch origin
+          LOCAL=$(git rev-parse HEAD)
+          REMOTE=$(git rev-parse origin/main)
+          if [ "$LOCAL" != "$REMOTE" ]; then
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "Submodule has updates: $LOCAL -> $REMOTE"
+          else
+            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "Submodule is up to date"
+          fi
+
+      - name: Update submodule
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          git submodule update --remote Markdown-Viewer
+
+      - name: Create Pull Request
+        if: steps.check.outputs.updated == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: auto/submodule-update
+          title: 'Update Markdown-Viewer submodule'
+          body: |
+            Automated update of the Markdown-Viewer submodule to latest upstream.
+
+            Please verify:
+            - [ ] App builds successfully
+            - [ ] Live reload works
+            - [ ] Theme persistence works
+            - [ ] No visual regressions
+          commit-message: 'chore: update Markdown-Viewer submodule'
+          delete-branch: true

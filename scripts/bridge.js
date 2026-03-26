@@ -85,6 +85,29 @@
     }
   });
 
+  // --- Auto-update check on startup ---
+  async function checkForUpdates() {
+    try {
+      if (!window.__TAURI__ || !window.__TAURI__.updater) return;
+      var update = await window.__TAURI__.updater.check();
+      if (update) {
+        var confirmed = confirm(
+          'New version ' + update.version + ' is available. Update now?'
+        );
+        if (confirmed) {
+          await update.downloadAndInstall();
+          if (window.__TAURI__.process) {
+            await window.__TAURI__.process.restart();
+          }
+        }
+      }
+    } catch (e) {
+      console.log('[updater] Check failed:', e);
+    }
+  }
+  // Delay update check to not block app startup
+  setTimeout(checkForUpdates, 3000);
+
   // --- Hard reload: clear all state except theme ---
   function hardReload() {
     var theme = localStorage.getItem(THEME_KEY);
