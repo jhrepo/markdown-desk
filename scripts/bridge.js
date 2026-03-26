@@ -85,7 +85,8 @@
     }
   });
 
-  // --- Auto-update check on startup ---
+  // --- Auto-update check (called on startup and from menu) ---
+  window.checkForUpdates = checkForUpdates;
   async function checkForUpdates() {
     try {
       if (!window.__TAURI__ || !window.__TAURI__.updater) return;

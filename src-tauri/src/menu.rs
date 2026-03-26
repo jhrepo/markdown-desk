@@ -1,8 +1,14 @@
+use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let check_update_item = MenuItemBuilder::with_id("check_update", "Check for Updates...")
+        .build(app)?;
+
     let app_menu = SubmenuBuilder::new(app, "Markdown Desk")
         .about(None)
+        .separator()
+        .item(&check_update_item)
         .separator()
         .quit()
         .build()?;
@@ -43,6 +49,11 @@ pub fn setup_menu_events(app: &tauri::AppHandle) {
         if event.id() == "open" {
             dbg_log!("[menu] Open clicked");
             crate::commands::open_file_and_watch(&app_handle);
+        } else if event.id() == "check_update" {
+            dbg_log!("[menu] Check for Updates clicked");
+            if let Some(ww) = app_handle.get_webview_window("main") {
+                let _ = ww.eval("if(typeof checkForUpdates==='function')checkForUpdates();");
+            }
         }
     });
 }
