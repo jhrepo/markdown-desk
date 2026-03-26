@@ -1,6 +1,10 @@
 use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
+/// JS to invoke the update check function exposed by bridge.js.
+pub(crate) const JS_CHECK_UPDATE: &str =
+    "if(typeof checkForUpdates==='function')checkForUpdates();";
+
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let check_update_item = MenuItemBuilder::with_id("check_update", "Check for Updates...")
         .build(app)?;
@@ -52,8 +56,31 @@ pub fn setup_menu_events(app: &tauri::AppHandle) {
         } else if event.id() == "check_update" {
             dbg_log!("[menu] Check for Updates clicked");
             if let Some(ww) = app_handle.get_webview_window("main") {
-                let _ = ww.eval("if(typeof checkForUpdates==='function')checkForUpdates();");
+                let _ = ww.eval(JS_CHECK_UPDATE);
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn js_check_update_calls_function() {
+        assert!(JS_CHECK_UPDATE.contains("checkForUpdates()"));
+    }
+
+    #[test]
+    fn js_check_update_has_typeof_guard() {
+        // Must guard against function not being defined
+        assert!(JS_CHECK_UPDATE.contains("typeof checkForUpdates==='function'"));
+    }
+
+    #[test]
+    fn js_check_update_is_single_statement() {
+        // Should be safe to eval — no unclosed braces or syntax issues
+        assert!(!JS_CHECK_UPDATE.contains('\n'));
+        assert!(JS_CHECK_UPDATE.ends_with(';'));
+    }
 }

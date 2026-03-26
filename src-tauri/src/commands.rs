@@ -348,6 +348,20 @@ mod tests {
         assert!(js.contains("tabs.find"));
     }
 
+    #[test]
+    fn js_update_tab_sync_has_typeof_guard() {
+        let js = js_update_tab("content");
+        assert!(js.contains("typeof tabs"));
+        assert!(js.contains("typeof activeTabId"));
+    }
+
+    #[test]
+    fn js_update_tab_sync_only_updates_active_tab() {
+        let js = js_update_tab("content");
+        // Should find tab by activeTabId, not update all tabs
+        assert!(js.contains("t.id === activeTabId"));
+    }
+
     // --- js_persist_watched_path tests ---
 
     #[test]
