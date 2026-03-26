@@ -40,7 +40,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM4Njc0M0E2NURFQEE2RDkKUldUWjV1cGRwa05uT0Y5VWRMWndEenVOK0V2QTdMSWtJUDdTeEZybXN2NFBTTTQ1Y3dxZi9NMU0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBQzJENkU1QzQyQkM4MzYKUldRMnlDdkU1ZGJDYWpuSUpYWWVpQWNBSE9PWERRT3Evc2VGUlpSeVFHVnpISlVzbE1URTdIaGwK",
       "endpoints": [
         "https://github.com/jhrepo/markdown-desk/releases/latest/download/latest.json"
       ]
