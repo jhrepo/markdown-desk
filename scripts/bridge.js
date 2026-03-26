@@ -120,9 +120,17 @@
             { title: 'Update Available', kind: 'info' }
           );
           if (confirmed) {
-            await update.downloadAndInstall();
-            if (window.__TAURI__.process) {
-              await window.__TAURI__.process.restart();
+            try {
+              await update.downloadAndInstall();
+              if (window.__TAURI__.process) {
+                await window.__TAURI__.process.restart();
+              }
+            } catch (dlErr) {
+              console.log('[updater] Download failed:', dlErr);
+              await window.__TAURI__.dialog.message(
+                'Update download failed: ' + dlErr,
+                { title: 'Update Error' }
+              );
             }
           }
         }

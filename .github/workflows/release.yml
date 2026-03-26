@@ -40,6 +40,19 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target x86_64-apple-darwin
 
+      - name: Rename artifacts with architecture suffix
+        run: |
+          # aarch64
+          mv "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown Desk.app.tar.gz" \
+             "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown.Desk_aarch64.app.tar.gz"
+          mv "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown Desk.app.tar.gz.sig" \
+             "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown.Desk_aarch64.app.tar.gz.sig"
+          # x86_64
+          mv "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown Desk.app.tar.gz" \
+             "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown.Desk_x86_64.app.tar.gz"
+          mv "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown Desk.app.tar.gz.sig" \
+             "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown.Desk_x86_64.app.tar.gz.sig"
+
       - name: Get submodule version
         id: submodule
         run: |
@@ -52,8 +65,8 @@ jobs:
       - name: Generate latest.json
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          AARCH64_SIG=$(cat src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown\ Desk.app.tar.gz.sig)
-          X86_64_SIG=$(cat src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown\ Desk.app.tar.gz.sig)
+          AARCH64_SIG=$(cat src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown.Desk_aarch64.app.tar.gz.sig)
+          X86_64_SIG=$(cat src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown.Desk_x86_64.app.tar.gz.sig)
           REPO=${{ github.repository }}
           TAG=${{ github.ref_name }}
           cat > latest.json << EOF
@@ -83,9 +96,9 @@ jobs:
             **Markdown-Viewer**: `${{ steps.submodule.outputs.version }}` ([ThisIs-Developer/Markdown-Viewer@${{ steps.submodule.outputs.commit }}](https://github.com/ThisIs-Developer/Markdown-Viewer/commit/${{ steps.submodule.outputs.commit }}))
           files: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown.Desk_aarch64.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Markdown.Desk_aarch64.app.tar.gz.sig
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown.Desk_x86_64.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Markdown.Desk_x86_64.app.tar.gz.sig
             latest.json
