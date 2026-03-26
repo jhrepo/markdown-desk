@@ -1,5 +1,7 @@
 # Markdown Desk
 
+![Screenshot](assets/screenshot.png)
+
 [한국어](#한국어) | [English](#english)
 
 ---
