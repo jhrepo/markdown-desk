@@ -24,7 +24,6 @@
 |--------|------|
 | `Cmd+O` | 마크다운 파일 열기 |
 | `Cmd+S` | 원본 파일에 저장 |
-| `Cmd+R` | 페이지 새로고침 |
 
 파일을 열면 외부 편집기에서 수정 시 자동으로 내용이 갱신됩니다.
 
@@ -60,7 +59,6 @@ Download the latest `.dmg` from [Releases](https://github.com/jhrepo/markdown-de
 |----------|--------|
 | `Cmd+O` | Open markdown file |
 | `Cmd+S` | Save to original file |
-| `Cmd+R` | Reload page |
 
 Opened files are automatically refreshed when modified by an external editor.
 
