@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
+  "productName": "Markdown Desk",
+  "version": "26.3.1",
+  "identifier": "com.markdowndesk.app",
+  "build": {
+    "beforeBuildCommand": "sh scripts/prepare-frontend.sh",
+    "beforeDevCommand": "sh scripts/prepare-frontend.sh",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": "default-src * 'self' 'unsafe-inline' 'unsafe-eval' data: blob: ipc: asset: tauri:; script-src * 'self' 'unsafe-inline' 'unsafe-eval' ipc: asset: tauri:; connect-src * 'self' ipc: asset: tauri: https: data:"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Markdown Desk",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 600,
+        "minHeight": 400,
+        "resizable": true,
+        "decorations": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBQzJENkU1QzQyQkM4MzYKUldRMnlDdkU1ZGJDYWpuSUpYWWVpQWNBSE9PWERRT3Evc2VGUlpSeVFHVnpISlVzbE1URTdIaGwK",
+      "endpoints": [
+        "https://github.com/jhrepo/markdown-desk/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
