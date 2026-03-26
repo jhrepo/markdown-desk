@@ -14,7 +14,21 @@
 - **네이티브 파일 열기/저장** — `Cmd+O`로 파일 열기, `Cmd+S`로 원본 파일에 저장.
 - **자동 업데이트** — 앱 시작 시 새 버전을 확인하고, 메뉴에서 수동 확인도 가능합니다.
 
-### 라이선스
+### 📦 설치
+
+[Releases](https://github.com/jhrepo/markdown-desk/releases)에서 최신 `.dmg` 파일을 다운로드하여 설치합니다.
+
+### 🔑 사용 방법
+
+| 단축키 | 동작 |
+|--------|------|
+| `Cmd+O` | 마크다운 파일 열기 |
+| `Cmd+S` | 원본 파일에 저장 |
+| `Cmd+R` | 페이지 새로고침 |
+
+파일을 열면 외부 편집기에서 수정 시 자동으로 내용이 갱신됩니다.
+
+### 📄 라이선스
 
 이 프로젝트는 [Apache License 2.0](LICENSE)으로 배포됩니다.
 
@@ -35,6 +49,20 @@ A native macOS desktop app that provides all features of [Markdown Viewer](https
 - **Live Reload** — Automatically refreshes when an open file is modified by an external editor.
 - **Native File Open/Save** — `Cmd+O` to open files, `Cmd+S` to save to the original file.
 - **Auto Update** — Checks for new versions on startup, with manual check available from the menu.
+
+### 📦 Install
+
+Download the latest `.dmg` from [Releases](https://github.com/jhrepo/markdown-desk/releases) and install.
+
+### 🔑 Usage
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+O` | Open markdown file |
+| `Cmd+S` | Save to original file |
+| `Cmd+R` | Reload page |
+
+Opened files are automatically refreshed when modified by an external editor.
 
 ### License
 
