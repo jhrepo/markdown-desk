@@ -55,21 +55,34 @@
       }, true);
     }
 
-    // Restore file watcher on app restart
-    var watchedPath = localStorage.getItem('markdown-desk-watched-path');
-    if (watchedPath && window.__TAURI_INTERNALS__) {
-      window.__TAURI_INTERNALS__.invoke('restore_watcher', { path: watchedPath });
+    // Restore file watchers on app restart
+    // Migrate old single-path key to new array key
+    var oldPath = localStorage.getItem('markdown-desk-watched-path');
+    if (oldPath) {
+      var existing = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
+      if (existing.indexOf(oldPath) < 0) existing.push(oldPath);
+      localStorage.setItem('markdown-desk-watched-paths', JSON.stringify(existing));
+      localStorage.removeItem('markdown-desk-watched-path');
+    }
+    var watchedPaths = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
+    if (watchedPaths.length && window.__TAURI_INTERNALS__) {
+      watchedPaths.forEach(function(p) {
+        window.__TAURI_INTERNALS__.invoke('restore_watcher', { path: p });
+      });
     }
 
-    // Refresh active tab with latest file content on tab switch
+    // Refresh active tab on tab switch (reads latest file from disk)
     var tabList = document.getElementById('tab-list');
     var mobileTabList = document.getElementById('mobile-tab-list');
     function onTabClick() {
-      if (window.__TAURI_INTERNALS__) {
-        setTimeout(function() {
-          window.__TAURI_INTERNALS__.invoke('refresh_active_tab');
-        }, 50);
-      }
+      if (!window.__TAURI_INTERNALS__) return;
+      setTimeout(function() {
+        var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
+        var title = activeEl ? activeEl.textContent.trim() : '';
+        if (title) {
+          window.__TAURI_INTERNALS__.invoke('refresh_active_tab', { title: title });
+        }
+      }, 50);
     }
     if (tabList) { tabList.addEventListener('click', onTabClick); }
     if (mobileTabList) { mobileTabList.addEventListener('click', onTabClick); }

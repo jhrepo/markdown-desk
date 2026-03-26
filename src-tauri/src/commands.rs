@@ -43,9 +43,9 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
             open_in_new_tab(&app_handle, &content, &filename);
 
             let state = app_handle.state::<WatcherState>();
-            match crate::watcher::start_watching(&app_handle, &state, path.clone()) {
+            match crate::watcher::add_file(&app_handle, &state, path.clone()) {
                 Ok(_) => {
-                    dbg_log!("[open] Watcher started");
+                    dbg_log!("[open] File added to watch list");
                     persist_watched_path(&app_handle, &path);
                 }
                 Err(e) => dbg_log!("[open] Watcher error: {}", e),
@@ -88,20 +88,23 @@ pub(crate) fn js_new_tab(content: &str, filename: &str) -> String {
     )
 }
 
-/// Generate JS to update the current tab's editor content.
-pub(crate) fn js_update_tab(content: &str) -> String {
+/// Generate JS to update the active tab if it matches the given filename.
+/// Checks the DOM tab bar for the active tab's title to determine if it matches.
+pub(crate) fn js_update_tab(content: &str, filename: &str) -> String {
     let js_content = escape_js(content);
+    let js_filename = escape_js(filename);
 
     format!(
         r#"(function() {{
+            var filename = `{}`;
+            var titleMatch = filename.replace(/\.md$/i, '');
+            var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
+            var activeTitle = activeEl ? activeEl.textContent.trim() : '';
+            if (activeTitle !== titleMatch && activeTitle !== filename) return;
             var editor = document.getElementById('markdown-editor');
             if (editor) {{
                 editor.value = `{}`;
                 editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                if (typeof tabs !== 'undefined' && typeof activeTabId !== 'undefined') {{
-                    var tab = tabs.find(function(t) {{ return t.id === activeTabId; }});
-                    if (tab) {{ tab.content = editor.value; }}
-                }}
                 setTimeout(function() {{
                     editor.scrollTop = 0;
                     var preview = document.getElementById('preview');
@@ -110,7 +113,7 @@ pub(crate) fn js_update_tab(content: &str) -> String {
                 }}, 100);
             }}
         }})()"#,
-        js_content
+        js_filename, js_content
     )
 }
 
@@ -124,10 +127,10 @@ fn open_in_new_tab(app: &tauri::AppHandle, content: &str, filename: &str) {
     }
 }
 
-/// Update content in the current tab (used by file watcher for live reload)
+/// Update content in matching tabs (used by file watcher for live reload)
 pub fn update_current_tab(app: &tauri::AppHandle, content: &str, filename: &str) {
     if let Some(ww) = app.get_webview_window("main") {
-        let js = js_update_tab(content);
+        let js = js_update_tab(content, filename);
         match ww.eval(&js) {
             Ok(_) => dbg_log!("[update] OK: {}", filename),
             Err(e) => dbg_log!("[update] Failed: {}", e),
@@ -135,15 +138,18 @@ pub fn update_current_tab(app: &tauri::AppHandle, content: &str, filename: &str)
     }
 }
 
-/// Generate JS to store a file path in localStorage.
-pub(crate) fn js_persist_watched_path(path: &str) -> String {
+/// Generate JS to add a file path to the watched paths list in localStorage.
+pub(crate) fn js_add_watched_path(path: &str) -> String {
     let escaped = escape_js(path);
-    format!("localStorage.setItem('markdown-desk-watched-path',`{}`);", escaped)
+    format!(
+        r#"(function(){{var k='markdown-desk-watched-paths';var arr=JSON.parse(localStorage.getItem(k)||'[]');var p=`{}`;if(arr.indexOf(p)<0)arr.push(p);localStorage.setItem(k,JSON.stringify(arr))}})()"#,
+        escaped
+    )
 }
 
 fn persist_watched_path(app: &tauri::AppHandle, path: &std::path::Path) {
     if let Some(ww) = app.get_webview_window("main") {
-        let js = js_persist_watched_path(&path.to_string_lossy());
+        let js = js_add_watched_path(&path.to_string_lossy());
         let _ = ww.eval(&js);
     }
 }
@@ -154,24 +160,23 @@ pub fn restore_watcher(app: tauri::AppHandle, path: String) {
     let path_buf = std::path::PathBuf::from(&path);
     if !path_buf.exists() {
         dbg_log!("[restore] File no longer exists: {}", path);
-        if let Some(ww) = app.get_webview_window("main") {
-            let _ = ww.eval("localStorage.removeItem('markdown-desk-watched-path');");
-        }
         return;
     }
     let state = app.state::<WatcherState>();
-    match crate::watcher::start_watching(&app, &state, path_buf) {
+    match crate::watcher::add_file(&app, &state, path_buf) {
         Ok(_) => dbg_log!("[restore] Watcher restored for: {}", path),
         Err(e) => dbg_log!("[restore] Watcher restore failed: {}", e),
     }
 }
 
-/// Tauri IPC command — called from bridge.js on tab switch to refresh with latest file content.
+/// Tauri IPC command — called from bridge.js on tab switch.
+/// Reads the file matching the given tab title and updates the tab.
 #[tauri::command]
-pub fn refresh_active_tab(app: tauri::AppHandle) {
+pub fn refresh_active_tab(app: tauri::AppHandle, title: String) {
     let state = app.state::<WatcherState>();
-    let path = state.current_path.lock().unwrap().clone();
-    let Some(path) = path else { return };
+    let Some(path) = crate::watcher::path_for_title(&state, &title) else {
+        return;
+    };
     match std::fs::read_to_string(&path) {
         Ok(content) => {
             let filename = filename_from_path(&path);
@@ -308,99 +313,113 @@ mod tests {
 
     #[test]
     fn js_update_tab_contains_content() {
-        let js = js_update_tab("# Updated");
+        let js = js_update_tab("# Updated", "test.md");
         assert!(js.contains("# Updated"));
         assert!(js.contains("markdown-editor"));
     }
 
     #[test]
     fn js_update_tab_escapes_content() {
-        let js = js_update_tab("code `block` ${x}");
+        let js = js_update_tab("code `block` ${x}", "test.md");
         assert!(js.contains("\\`block\\`"));
         assert!(js.contains("\\${x}"));
     }
 
     #[test]
     fn js_update_tab_dispatches_input_event() {
-        let js = js_update_tab("content");
+        let js = js_update_tab("content", "test.md");
         assert!(js.contains("dispatchEvent"));
         assert!(js.contains("'input'"));
     }
 
     #[test]
     fn js_update_tab_scrolls_to_top() {
-        let js = js_update_tab("content");
+        let js = js_update_tab("content", "test.md");
         assert!(js.contains("scrollTop = 0"));
         assert!(js.contains("window.scrollTo(0, 0)"));
     }
 
     #[test]
     fn js_update_tab_empty() {
-        let js = js_update_tab("");
+        let js = js_update_tab("", "empty.md");
+        assert!(js.contains("empty.md"));
         assert!(js.contains("markdown-editor"));
     }
 
     #[test]
-    fn js_update_tab_syncs_tab_content() {
-        let js = js_update_tab("content");
-        assert!(js.contains("tab.content = editor.value"));
-        assert!(js.contains("activeTabId"));
-        assert!(js.contains("tabs.find"));
+    fn js_update_tab_checks_active_tab_title() {
+        let js = js_update_tab("content", "test.md");
+        // Reads active tab title from DOM
+        assert!(js.contains(".tab-item.active .tab-title"));
+        assert!(js.contains("activeTitle"));
     }
 
     #[test]
-    fn js_update_tab_sync_has_typeof_guard() {
-        let js = js_update_tab("content");
-        assert!(js.contains("typeof tabs"));
-        assert!(js.contains("typeof activeTabId"));
+    fn js_update_tab_skips_non_matching_tab() {
+        let js = js_update_tab("content", "test.md");
+        // Returns early if active tab doesn't match
+        assert!(js.contains("activeTitle !== titleMatch"));
+        assert!(js.contains("activeTitle !== filename"));
+        assert!(js.contains("return"));
     }
 
     #[test]
-    fn js_update_tab_sync_only_updates_active_tab() {
-        let js = js_update_tab("content");
-        // Should find tab by activeTabId, not update all tabs
-        assert!(js.contains("t.id === activeTabId"));
+    fn js_update_tab_matches_without_extension() {
+        let js = js_update_tab("content", "test.md");
+        assert!(js.contains("replace(/\\.md$/i, '')"));
     }
 
-    // --- js_persist_watched_path tests ---
+    #[test]
+    fn js_update_tab_contains_filename() {
+        let js = js_update_tab("content", "readme.md");
+        assert!(js.contains("readme.md"));
+    }
 
     #[test]
-    fn js_persist_watched_path_basic() {
-        let js = js_persist_watched_path("/Users/test/file.md");
-        assert!(js.contains("localStorage.setItem"));
-        assert!(js.contains("markdown-desk-watched-path"));
+    fn js_update_tab_escapes_filename() {
+        let js = js_update_tab("content", "file`name.md");
+        assert!(js.contains("file\\`name.md"));
+    }
+
+    // --- js_add_watched_path tests ---
+
+    #[test]
+    fn js_add_watched_path_basic() {
+        let js = js_add_watched_path("/Users/test/file.md");
+        assert!(js.contains("localStorage"));
+        assert!(js.contains("markdown-desk-watched-paths"));
         assert!(js.contains("/Users/test/file.md"));
     }
 
     #[test]
-    fn js_persist_watched_path_escapes_special() {
-        let js = js_persist_watched_path("/path/with `backtick`/file.md");
+    fn js_add_watched_path_escapes_special() {
+        let js = js_add_watched_path("/path/with `backtick`/file.md");
         assert!(js.contains("\\`backtick\\`"));
     }
 
     #[test]
-    fn js_persist_watched_path_spaces() {
-        let js = js_persist_watched_path("/Users/test/my documents/file.md");
+    fn js_add_watched_path_spaces() {
+        let js = js_add_watched_path("/Users/test/my documents/file.md");
         assert!(js.contains("my documents"));
     }
 
     #[test]
-    fn js_persist_watched_path_empty() {
-        let js = js_persist_watched_path("");
-        assert!(js.contains("markdown-desk-watched-path"));
-        assert!(js.contains("localStorage.setItem"));
+    fn js_add_watched_path_empty() {
+        let js = js_add_watched_path("");
+        assert!(js.contains("markdown-desk-watched-paths"));
+        assert!(js.contains("localStorage"));
     }
 
     #[test]
-    fn js_persist_watched_path_unicode() {
-        let js = js_persist_watched_path("/Users/홍길동/문서/메모.md");
+    fn js_add_watched_path_unicode() {
+        let js = js_add_watched_path("/Users/홍길동/문서/메모.md");
         assert!(js.contains("홍길동"));
         assert!(js.contains("메모.md"));
     }
 
     #[test]
-    fn js_persist_watched_path_template_literal() {
-        let js = js_persist_watched_path("/path/${dir}/file.md");
+    fn js_add_watched_path_template_literal() {
+        let js = js_add_watched_path("/path/${dir}/file.md");
         // ${dir} should be escaped to \${dir}
         assert!(js.contains("\\${dir}"));
         // raw unescaped ${dir} should not appear (all occurrences are escaped)
@@ -411,9 +430,22 @@ mod tests {
     }
 
     #[test]
-    fn js_persist_watched_path_correct_key() {
-        let js = js_persist_watched_path("/any/path.md");
-        assert!(js.starts_with("localStorage.setItem('markdown-desk-watched-path',"));
+    fn js_add_watched_path_correct_key() {
+        let js = js_add_watched_path("/any/path.md");
+        assert!(js.contains("markdown-desk-watched-paths"));
+    }
+
+    #[test]
+    fn js_add_watched_path_deduplicates() {
+        let js = js_add_watched_path("/any/path.md");
+        assert!(js.contains("indexOf(p)<0"));
+    }
+
+    #[test]
+    fn js_add_watched_path_is_iife() {
+        let js = js_add_watched_path("/any/path.md");
+        assert!(js.starts_with("(function()"));
+        assert!(js.ends_with("()"));
     }
 
     // --- escape_js edge cases ---
@@ -518,7 +550,7 @@ mod tests {
 
     #[test]
     fn js_update_tab_is_iife() {
-        let js = js_update_tab("x");
+        let js = js_update_tab("x", "x.md");
         let trimmed = js.trim();
         assert!(trimmed.starts_with("(function()"));
         assert!(trimmed.ends_with("()"));
@@ -527,14 +559,14 @@ mod tests {
     #[test]
     fn js_update_tab_large_content() {
         let large = "line\n".repeat(50_000);
-        let js = js_update_tab(&large);
-        assert!(js.contains("markdown-editor"));
+        let js = js_update_tab(&large, "large.md");
+        assert!(js.contains("large.md"));
         assert!(js.len() > large.len());
     }
 
     #[test]
     fn js_update_tab_unicode_content() {
-        let js = js_update_tab("# 한글 제목\n\n본문입니다");
+        let js = js_update_tab("# 한글 제목\n\n본문입니다", "메모.md");
         assert!(js.contains("한글 제목"));
         assert!(js.contains("본문입니다"));
     }
@@ -544,7 +576,7 @@ mod tests {
     #[test]
     fn js_new_tab_and_update_tab_both_scroll_to_top() {
         let new_js = js_new_tab("a", "a.md");
-        let update_js = js_update_tab("a");
+        let update_js = js_update_tab("a", "a.md");
         // Both should scroll to top
         assert!(new_js.contains("scrollTop = 0"));
         assert!(update_js.contains("scrollTop = 0"));

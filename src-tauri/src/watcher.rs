@@ -1,4 +1,5 @@
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,16 +9,26 @@ const DEBOUNCE_MS: u64 = 300;
 
 pub struct WatcherState {
     pub handle: Mutex<Option<RecommendedWatcher>>,
-    pub current_path: Mutex<Option<PathBuf>>,
+    /// filename → canonical path for all opened files
+    pub files: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl WatcherState {
     pub fn new() -> Self {
         Self {
             handle: Mutex::new(None),
-            current_path: Mutex::new(None),
+            files: Mutex::new(HashMap::new()),
         }
     }
+}
+
+/// Look up the file path for a given tab title (filename or title without .md).
+pub fn path_for_title(state: &WatcherState, title: &str) -> Option<PathBuf> {
+    let files = state.files.lock().unwrap();
+    files.get(title).cloned().or_else(|| {
+        let with_ext = format!("{}.md", title);
+        files.get(&with_ext).cloned()
+    })
 }
 
 fn now_millis() -> u64 {
@@ -32,31 +43,39 @@ pub(crate) fn is_relevant_event(kind: &EventKind) -> bool {
     matches!(kind, EventKind::Modify(_) | EventKind::Create(_))
 }
 
-/// Returns true if any path in the event matches the target (after canonicalization).
-pub(crate) fn event_matches_target(event_paths: &[PathBuf], target: &PathBuf) -> bool {
-    event_paths
-        .iter()
-        .any(|p| p.canonicalize().unwrap_or_else(|_| p.clone()) == *target)
-}
-
 /// Returns true if enough time has passed since last_ms (debounce check).
 pub(crate) fn should_emit(now_ms: u64, last_ms: u64, debounce_ms: u64) -> bool {
     now_ms - last_ms >= debounce_ms
 }
 
-pub fn start_watching(
+/// Add a file and rebuild the watcher to cover all files.
+pub fn add_file(
     app: &tauri::AppHandle,
     state: &WatcherState,
     path: PathBuf,
 ) -> Result<(), String> {
-    stop_watching(state);
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let filename = crate::commands::filename_from_path(&path);
+
+    state.files.lock().unwrap().insert(filename.clone(), canonical);
+    dbg_log!("Added file: {}", filename);
+
+    rebuild_watcher(app, state)
+}
+
+/// Rebuild the watcher to cover all registered files.
+fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), String> {
+    // Stop existing watcher (but keep files map)
+    state.handle.lock().unwrap().take();
+
+    let files_snapshot: HashMap<String, PathBuf> = state.files.lock().unwrap().clone();
+    if files_snapshot.is_empty() {
+        return Ok(());
+    }
 
     let app_handle = app.clone();
-    let target_path = path.canonicalize().map_err(|e| e.to_string())?;
-    let watch_path = path.clone();
+    let watched_files = Arc::new(files_snapshot.clone());
     let last_emit = Arc::new(AtomicU64::new(0));
-
-    dbg_log!("Target: {}", target_path.display());
 
     let mut watcher = RecommendedWatcher::new(
         move |result: Result<notify::Event, notify::Error>| {
@@ -65,64 +84,69 @@ pub fn start_watching(
                     if !is_relevant_event(&event.kind) {
                         return;
                     }
-                    if !event_matches_target(&event.paths, &target_path) {
-                        return;
-                    }
 
                     let now = now_millis();
                     let last = last_emit.load(Ordering::Relaxed);
                     if !should_emit(now, last, DEBOUNCE_MS) {
                         return;
                     }
-                    last_emit.store(now, Ordering::Relaxed);
 
-                    dbg_log!("File changed, injecting...");
-                    match std::fs::read_to_string(&watch_path) {
-                        Ok(content) => {
-                            let filename = crate::commands::filename_from_path(&watch_path);
-                            crate::commands::update_current_tab(
-                                &app_handle, &content, &filename,
-                            );
-                            dbg_log!("Inject done");
+                    for event_path in &event.paths {
+                        let canon = event_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| event_path.clone());
+
+                        for (fname, watched_path) in watched_files.iter() {
+                            if canon == *watched_path {
+                                last_emit.store(now, Ordering::Relaxed);
+                                dbg_log!("File changed: {}", fname);
+                                if let Ok(content) = std::fs::read_to_string(event_path) {
+                                    crate::commands::update_current_tab(
+                                        &app_handle, &content, fname,
+                                    );
+                                }
+                                return;
+                            }
                         }
-                        Err(e) => dbg_log!("Read error: {}", e),
                     }
                 }
-                Err(e) => dbg_log!("Error: {}", e),
+                Err(e) => dbg_log!("Watcher error: {}", e),
             }
         },
         Config::default(),
     )
     .map_err(|e| format!("Failed to create watcher: {}", e))?;
 
-    let watch_dir = path
-        .parent()
-        .ok_or_else(|| "Cannot get parent directory".to_string())?;
-    dbg_log!("Watching dir: {}", watch_dir.display());
-
-    watcher
-        .watch(watch_dir, RecursiveMode::NonRecursive)
-        .map_err(|e| format!("Failed to watch: {}", e))?;
+    // Watch all unique parent directories
+    let mut dirs_watched = std::collections::HashSet::new();
+    for path in files_snapshot.values() {
+        if let Some(dir) = path.parent() {
+            if dirs_watched.insert(dir.to_path_buf()) {
+                watcher
+                    .watch(dir, RecursiveMode::NonRecursive)
+                    .map_err(|e| format!("Failed to watch {}: {}", dir.display(), e))?;
+                dbg_log!("Watching dir: {}", dir.display());
+            }
+        }
+    }
 
     *state.handle.lock().unwrap() = Some(watcher);
-    *state.current_path.lock().unwrap() = Some(path);
-
-    dbg_log!("Watch started OK");
+    dbg_log!("Watcher rebuilt for {} files", files_snapshot.len());
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn stop_watching(state: &WatcherState) {
     if state.handle.lock().unwrap().take().is_some() {
         dbg_log!("Stopped");
     }
-    let _ = state.current_path.lock().unwrap().take();
+    state.files.lock().unwrap().clear();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
-    use std::fs;
 
     // --- WatcherState tests ---
 
@@ -130,7 +154,7 @@ mod tests {
     fn watcher_state_initial() {
         let state = WatcherState::new();
         assert!(state.handle.lock().unwrap().is_none());
-        assert!(state.current_path.lock().unwrap().is_none());
+        assert!(state.files.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -138,15 +162,59 @@ mod tests {
         let state = WatcherState::new();
         stop_watching(&state);
         assert!(state.handle.lock().unwrap().is_none());
-        assert!(state.current_path.lock().unwrap().is_none());
+        assert!(state.files.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn stop_watching_clears_path() {
+    fn stop_watching_clears_files() {
         let state = WatcherState::new();
-        *state.current_path.lock().unwrap() = Some(PathBuf::from("/tmp/test.md"));
+        state.files.lock().unwrap().insert("test.md".to_string(), PathBuf::from("/tmp/test.md"));
         stop_watching(&state);
-        assert!(state.current_path.lock().unwrap().is_none());
+        assert!(state.files.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_watching_twice_is_safe() {
+        let state = WatcherState::new();
+        state.files.lock().unwrap().insert("a.md".to_string(), PathBuf::from("/tmp/a.md"));
+        stop_watching(&state);
+        stop_watching(&state);
+        assert!(state.files.lock().unwrap().is_empty());
+    }
+
+    // --- path_for_title tests ---
+
+    #[test]
+    fn path_for_title_exact() {
+        let state = WatcherState::new();
+        let path = PathBuf::from("/tmp/test.md");
+        state.files.lock().unwrap().insert("test.md".to_string(), path.clone());
+        assert_eq!(path_for_title(&state, "test.md"), Some(path));
+    }
+
+    #[test]
+    fn path_for_title_without_extension() {
+        let state = WatcherState::new();
+        let path = PathBuf::from("/tmp/test.md");
+        state.files.lock().unwrap().insert("test.md".to_string(), path.clone());
+        assert_eq!(path_for_title(&state, "test"), Some(path));
+    }
+
+    #[test]
+    fn path_for_title_not_found() {
+        let state = WatcherState::new();
+        assert_eq!(path_for_title(&state, "missing.md"), None);
+    }
+
+    #[test]
+    fn path_for_title_multiple_files() {
+        let state = WatcherState::new();
+        let path_a = PathBuf::from("/tmp/a.md");
+        let path_b = PathBuf::from("/tmp/b.md");
+        state.files.lock().unwrap().insert("a.md".to_string(), path_a.clone());
+        state.files.lock().unwrap().insert("b.md".to_string(), path_b.clone());
+        assert_eq!(path_for_title(&state, "a.md"), Some(path_a));
+        assert_eq!(path_for_title(&state, "b"), Some(path_b));
     }
 
     // --- now_millis tests ---
@@ -167,9 +235,7 @@ mod tests {
 
     #[test]
     fn relevant_event_modify() {
-        assert!(is_relevant_event(&EventKind::Modify(ModifyKind::Data(
-            DataChange::Content
-        ))));
+        assert!(is_relevant_event(&EventKind::Modify(ModifyKind::Data(DataChange::Content))));
     }
 
     #[test]
@@ -184,9 +250,7 @@ mod tests {
 
     #[test]
     fn irrelevant_event_access() {
-        assert!(!is_relevant_event(&EventKind::Access(
-            notify::event::AccessKind::Read
-        )));
+        assert!(!is_relevant_event(&EventKind::Access(notify::event::AccessKind::Read)));
     }
 
     #[test]
@@ -221,60 +285,6 @@ mod tests {
         assert!(should_emit(100, 100, 0));
     }
 
-    // --- event_matches_target tests ---
-
-    #[test]
-    fn event_matches_target_with_match() {
-        let dir = std::env::temp_dir().join("md_test_match");
-        fs::create_dir_all(&dir).ok();
-        let file = dir.join("target.md");
-        fs::write(&file, "test").unwrap();
-        let target = file.canonicalize().unwrap();
-
-        assert!(event_matches_target(&[file.clone()], &target));
-        fs::remove_file(&file).ok();
-    }
-
-    #[test]
-    fn event_matches_target_no_match() {
-        let dir = std::env::temp_dir().join("md_test_nomatch");
-        fs::create_dir_all(&dir).ok();
-        let file_a = dir.join("a.md");
-        let file_b = dir.join("b.md");
-        fs::write(&file_a, "a").unwrap();
-        fs::write(&file_b, "b").unwrap();
-        let target = file_a.canonicalize().unwrap();
-
-        assert!(!event_matches_target(&[file_b.clone()], &target));
-        fs::remove_file(&file_a).ok();
-        fs::remove_file(&file_b).ok();
-    }
-
-    #[test]
-    fn event_matches_target_empty_paths() {
-        let target = PathBuf::from("/tmp/nonexistent.md");
-        assert!(!event_matches_target(&[], &target));
-    }
-
-    // --- debounce integration test ---
-
-    #[test]
-    fn debounce_logic() {
-        let last_emit = Arc::new(AtomicU64::new(0));
-
-        let now = now_millis();
-        let last = last_emit.load(Ordering::Relaxed);
-        assert!(should_emit(now, last, DEBOUNCE_MS));
-
-        last_emit.store(now, Ordering::Relaxed);
-
-        let now2 = now_millis();
-        let last2 = last_emit.load(Ordering::Relaxed);
-        assert!(!should_emit(now2, last2, DEBOUNCE_MS));
-    }
-
-    // --- is_relevant_event edge cases ---
-
     #[test]
     fn relevant_event_modify_any() {
         assert!(is_relevant_event(&EventKind::Modify(ModifyKind::Any)));
@@ -292,13 +302,9 @@ mod tests {
         ))));
     }
 
-    // --- should_emit edge cases ---
-
     #[test]
     fn should_emit_same_timestamp() {
-        // Same time with 0 debounce → emit
         assert!(should_emit(500, 500, 0));
-        // Same time with any debounce → no emit
         assert!(!should_emit(500, 500, 1));
     }
 
@@ -314,87 +320,18 @@ mod tests {
 
     #[test]
     fn should_emit_exactly_at_debounce() {
-        // 1300 - 1000 = 300, which equals debounce → should emit
         assert!(should_emit(1300, 1000, 300));
     }
 
-    // --- event_matches_target edge cases ---
-
     #[test]
-    fn event_matches_target_multiple_paths_one_match() {
-        let dir = std::env::temp_dir().join("md_test_multi");
-        fs::create_dir_all(&dir).ok();
-        let target_file = dir.join("target.md");
-        let other_file = dir.join("other.md");
-        fs::write(&target_file, "t").unwrap();
-        fs::write(&other_file, "o").unwrap();
-        let target = target_file.canonicalize().unwrap();
-
-        // Multiple paths, only one matches
-        assert!(event_matches_target(
-            &[other_file.clone(), target_file.clone()],
-            &target
-        ));
-
-        fs::remove_file(&target_file).ok();
-        fs::remove_file(&other_file).ok();
-    }
-
-    #[test]
-    fn event_matches_target_multiple_paths_none_match() {
-        let dir = std::env::temp_dir().join("md_test_none");
-        fs::create_dir_all(&dir).ok();
-        let a = dir.join("a.md");
-        let b = dir.join("b.md");
-        let target_file = dir.join("target.md");
-        fs::write(&a, "a").unwrap();
-        fs::write(&b, "b").unwrap();
-        fs::write(&target_file, "t").unwrap();
-        let target = target_file.canonicalize().unwrap();
-
-        assert!(!event_matches_target(&[a.clone(), b.clone()], &target));
-
-        fs::remove_file(&a).ok();
-        fs::remove_file(&b).ok();
-        fs::remove_file(&target_file).ok();
-    }
-
-    #[test]
-    fn event_matches_target_nonexistent_event_path() {
-        let dir = std::env::temp_dir().join("md_test_nonexist");
-        fs::create_dir_all(&dir).ok();
-        let target_file = dir.join("exists.md");
-        fs::write(&target_file, "x").unwrap();
-        let target = target_file.canonicalize().unwrap();
-
-        // Event path doesn't exist on disk — canonicalize falls back to clone
-        let fake = dir.join("doesnotexist.md");
-        assert!(!event_matches_target(&[fake], &target));
-
-        fs::remove_file(&target_file).ok();
-    }
-
-    // --- WatcherState edge cases ---
-
-    #[test]
-    fn stop_watching_twice_is_safe() {
-        let state = WatcherState::new();
-        *state.current_path.lock().unwrap() = Some(PathBuf::from("/tmp/a.md"));
-        stop_watching(&state);
-        stop_watching(&state);
-        assert!(state.current_path.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn watcher_state_set_and_clear_path() {
-        let state = WatcherState::new();
-        let path = PathBuf::from("/tmp/test.md");
-        *state.current_path.lock().unwrap() = Some(path.clone());
-        assert_eq!(
-            state.current_path.lock().unwrap().as_ref().unwrap(),
-            &path
-        );
-        stop_watching(&state);
-        assert!(state.current_path.lock().unwrap().is_none());
+    fn debounce_logic() {
+        let last_emit = Arc::new(AtomicU64::new(0));
+        let now = now_millis();
+        let last = last_emit.load(Ordering::Relaxed);
+        assert!(should_emit(now, last, DEBOUNCE_MS));
+        last_emit.store(now, Ordering::Relaxed);
+        let now2 = now_millis();
+        let last2 = last_emit.load(Ordering::Relaxed);
+        assert!(!should_emit(now2, last2, DEBOUNCE_MS));
     }
 }
