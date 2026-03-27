@@ -14,6 +14,7 @@
 
 - **파일 변경 감시(Live Reload)** — 열린 파일이 외부 편집기에서 수정되면 자동으로 내용이 갱신됩니다.
 - **네이티브 파일 열기/저장** — `Cmd+O`로 파일 열기, `Cmd+S`로 원본 파일에 저장.
+- **원본 추적** — Markdown Viewer 원본 소스를 Git 서브모듈로 추적하며, 업스트림 업데이트를 반영합니다.
 - **자동 업데이트** — 앱 시작 시 새 버전을 확인하고, 메뉴에서 수동 확인도 가능합니다.
 
 ### 📦 설치
@@ -79,6 +80,7 @@ A native macOS desktop app that provides all features of [Markdown Viewer](https
 
 - **Live Reload** — Automatically refreshes when an open file is modified by an external editor.
 - **Native File Open/Save** — `Cmd+O` to open files, `Cmd+S` to save to the original file.
+- **Tracks Upstream** — Includes the original Markdown Viewer source as a Git submodule and periodically merges upstream updates.
 - **Auto Update** — Checks for new versions on startup, with manual check available from the menu.
 
 ### 📦 Install
