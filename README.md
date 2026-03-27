@@ -61,11 +61,11 @@ xattr -rd com.apple.quarantine /Applications/Markdown\ Desk.app
 
 ### 📄 라이선스
 
-이 프로젝트는 [Apache License 2.0](LICENSE)으로 배포됩니다.
+이 프로젝트는 [MIT License](LICENSE)로 배포됩니다.
 
 웹 프론트엔드는 [ThisIs-Developer](https://github.com/ThisIs-Developer)의
 [Markdown Viewer](https://github.com/ThisIs-Developer/Markdown-Viewer)를 기반으로 하며,
-동일하게 [Apache License 2.0](https://github.com/ThisIs-Developer/Markdown-Viewer/blob/main/LICENSE)으로 배포됩니다.
+동일하게 [MIT License](https://github.com/ThisIs-Developer/Markdown-Viewer/blob/main/LICENSE)로 배포됩니다.
 
 macOS 데스크톱 래퍼는 [Tauri](https://tauri.app/)로 제작되었습니다.
 
@@ -114,23 +114,23 @@ Set Markdown Desk to open `.md` files by double-click:
 
 Opened files are automatically refreshed when modified by an external editor.
 
-### License
+### 🤝 Contributing
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+Everyone is welcome! Bug reports and feature ideas are all appreciated.
+
+1. Fork this project
+2. Create a new branch (`git checkout -b amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin amazing-feature`)
+5. Open a Pull Request
+
+### 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
 
 The web frontend is based on
 [Markdown Viewer](https://github.com/ThisIs-Developer/Markdown-Viewer)
 by [ThisIs-Developer](https://github.com/ThisIs-Developer),
-also licensed under the [Apache License 2.0](https://github.com/ThisIs-Developer/Markdown-Viewer/blob/main/LICENSE).
+also licensed under the [MIT License](https://github.com/ThisIs-Developer/Markdown-Viewer/blob/main/LICENSE).
 
 The macOS desktop wrapper is built with [Tauri](https://tauri.app/).
-
-### 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the project
-2. Create your feature branch (`git checkout -b amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin amazing-feature`)
-5. Open a Pull Request
