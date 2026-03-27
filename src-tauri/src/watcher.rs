@@ -30,7 +30,7 @@ impl WatcherState {
 
 /// Look up the file path for a given tab title (filename or title without .md).
 pub fn path_for_title(state: &WatcherState, title: &str) -> Option<PathBuf> {
-    let files = state.files.lock().unwrap();
+    let files = state.files.lock().ok()?;
     files.get(title).cloned().or_else(|| {
         let with_ext = format!("{}.md", title);
         files.get(&with_ext).cloned()
@@ -63,7 +63,8 @@ pub fn add_file(
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
     let filename = crate::commands::filename_from_path(&path);
 
-    state.files.lock().unwrap().insert(filename.clone(), canonical);
+    state.files.lock().map_err(|e| format!("Lock error: {}", e))?
+        .insert(filename.clone(), canonical);
     dbg_log!("Added file: {}", filename);
 
     rebuild_watcher(app, state)
@@ -72,9 +73,10 @@ pub fn add_file(
 /// Rebuild the watcher to cover all registered files.
 fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), String> {
     // Stop existing watcher (but keep files map)
-    state.handle.lock().unwrap().take();
+    state.handle.lock().map_err(|e| format!("Lock error: {}", e))?.take();
 
-    let files_snapshot: HashMap<String, PathBuf> = state.files.lock().unwrap().clone();
+    let files_snapshot: HashMap<String, PathBuf> = state.files.lock()
+        .map_err(|e| format!("Lock error: {}", e))?.clone();
     if files_snapshot.is_empty() {
         return Ok(());
     }
@@ -136,17 +138,20 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
         }
     }
 
-    *state.handle.lock().unwrap() = Some(watcher);
+    *state.handle.lock().map_err(|e| format!("Lock error: {}", e))? = Some(watcher);
     dbg_log!("Watcher rebuilt for {} files", files_snapshot.len());
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn stop_watching(state: &WatcherState) {
-    if state.handle.lock().unwrap().take().is_some() {
-        dbg_log!("Stopped");
+/// Stop watching all files and clear the file list.
+#[cfg(test)]
+fn stop_watching(state: &WatcherState) {
+    if let Ok(mut guard) = state.handle.lock() {
+        guard.take();
     }
-    state.files.lock().unwrap().clear();
+    if let Ok(mut guard) = state.files.lock() {
+        guard.clear();
+    }
 }
 
 #[cfg(test)]

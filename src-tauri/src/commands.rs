@@ -175,7 +175,10 @@ pub(crate) fn js_add_watched_path(path: &str) -> String {
 fn persist_watched_path(app: &tauri::AppHandle, path: &std::path::Path) {
     if let Some(ww) = app.get_webview_window("main") {
         let js = js_add_watched_path(&path.to_string_lossy());
-        let _ = ww.eval(&js);
+        match ww.eval(&js) {
+            Ok(_) => dbg_log!("[persist] Watched path stored: {}", path.display()),
+            Err(e) => dbg_log!("[persist] Failed to store watched path: {}", e),
+        }
     }
 }
 

@@ -3,15 +3,25 @@ use std::sync::Mutex;
 
 static LOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
+fn cache_dir() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Library/Caches"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+}
+
 pub fn init() {
-    let path = "/tmp/markdown-desk-debug.log";
+    let log_dir = cache_dir().join("markdown-desk");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let path = log_dir.join("debug.log");
     if let Ok(f) = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(path)
+        .open(&path)
     {
         *LOG_FILE.lock().unwrap() = Some(f);
+    } else {
+        eprintln!("Warning: Failed to initialize log file at {}", path.display());
     }
 }
 

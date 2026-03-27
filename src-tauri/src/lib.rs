@@ -41,7 +41,12 @@ pub fn run() {
                 // Wait for the webview to be ready
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let pending = app_handle.state::<PendingFiles>();
-                let files: Vec<_> = pending.0.lock().unwrap().drain(..).collect();
+                let Ok(mut guard) = pending.0.lock() else {
+                    dbg_log!("[file-assoc] Failed to lock pending files");
+                    return;
+                };
+                let files: Vec<_> = guard.drain(..).collect();
+                drop(guard);
                 for path in files {
                     dbg_log!("[file-assoc] Processing queued file: {}", path.display());
                     commands::open_file_directly(&app_handle, path);
@@ -65,7 +70,10 @@ pub fn run() {
                         commands::open_file_directly(app_handle, path);
                     } else {
                         let pending = app_handle.state::<PendingFiles>();
-                        pending.0.lock().unwrap().push(path);
+                        match pending.0.lock() {
+                            Ok(mut guard) => guard.push(path),
+                            Err(e) => dbg_log!("[file-assoc] Lock error: {}", e),
+                        };
                     }
                 }
             }
@@ -75,11 +83,39 @@ pub fn run() {
 
 fn url_to_path(url: &str) -> std::path::PathBuf {
     if let Some(path_str) = url.strip_prefix("file://") {
-        // URL decode (e.g., %20 → space)
-        let decoded = path_str.replace("%20", " ");
+        let decoded = percent_decode(path_str);
         std::path::PathBuf::from(decoded)
     } else {
         std::path::PathBuf::from(url)
+    }
+}
+
+/// Decode percent-encoded characters in a URL path (e.g., %20 → space, %ED%95%9C → 한).
+fn percent_decode(input: &str) -> String {
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next().and_then(|c| hex_val(c));
+            let lo = chars.next().and_then(|c| hex_val(c));
+            if let (Some(h), Some(l)) = (hi, lo) {
+                bytes.push(h << 4 | l);
+            } else {
+                bytes.push(b'%');
+            }
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -103,5 +139,76 @@ mod tests {
     fn url_to_path_plain_path() {
         let path = url_to_path("/Users/test/file.md");
         assert_eq!(path, std::path::PathBuf::from("/Users/test/file.md"));
+    }
+
+    // --- percent_decode tests ---
+
+    #[test]
+    fn percent_decode_no_encoding() {
+        assert_eq!(percent_decode("/Users/test/file.md"), "/Users/test/file.md");
+    }
+
+    #[test]
+    fn percent_decode_space() {
+        assert_eq!(percent_decode("/my%20file.md"), "/my file.md");
+    }
+
+    #[test]
+    fn percent_decode_korean() {
+        assert_eq!(percent_decode("/%ED%95%9C%EA%B8%80.md"), "/한글.md");
+    }
+
+    #[test]
+    fn percent_decode_special_chars() {
+        assert_eq!(percent_decode("/a%23b%26c"), "/a#b&c");
+    }
+
+    #[test]
+    fn percent_decode_mixed() {
+        assert_eq!(percent_decode("/Users/%ED%99%8D%EA%B8%B8%EB%8F%99/my%20docs/file.md"),
+                   "/Users/홍길동/my docs/file.md");
+    }
+
+    #[test]
+    fn percent_decode_incomplete_sequence() {
+        // Incomplete %XX at end — keep % literal
+        assert_eq!(percent_decode("/file%2"), "/file%");
+    }
+
+    #[test]
+    fn percent_decode_invalid_hex() {
+        assert_eq!(percent_decode("/file%ZZ"), "/file%");
+    }
+
+    #[test]
+    fn percent_decode_empty() {
+        assert_eq!(percent_decode(""), "");
+    }
+
+    // --- hex_val tests ---
+
+    #[test]
+    fn hex_val_digits() {
+        assert_eq!(hex_val(b'0'), Some(0));
+        assert_eq!(hex_val(b'9'), Some(9));
+    }
+
+    #[test]
+    fn hex_val_lowercase() {
+        assert_eq!(hex_val(b'a'), Some(10));
+        assert_eq!(hex_val(b'f'), Some(15));
+    }
+
+    #[test]
+    fn hex_val_uppercase() {
+        assert_eq!(hex_val(b'A'), Some(10));
+        assert_eq!(hex_val(b'F'), Some(15));
+    }
+
+    #[test]
+    fn hex_val_invalid() {
+        assert_eq!(hex_val(b'g'), None);
+        assert_eq!(hex_val(b'Z'), None);
+        assert_eq!(hex_val(b' '), None);
     }
 }
