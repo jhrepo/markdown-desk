@@ -48,3 +48,4 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - 원본 `Markdown-Viewer/` 서브모듈은 절대 직접 수정하지 않음
 - 모든 오버라이드는 `scripts/bridge.js`에서 처리
 - 한국어로 소통
+- 커밋 메시지, 릴리즈 노트는 한국어로 작성

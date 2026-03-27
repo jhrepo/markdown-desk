@@ -18,7 +18,27 @@
 
 ### 📦 설치
 
-[Releases](https://github.com/jhrepo/markdown-desk/releases)에서 최신 `.dmg` 파일을 다운로드하여 설치합니다.
+1. [Releases](https://github.com/jhrepo/markdown-desk/releases)에서 최신 `.dmg` 파일 다운로드
+2. 다운로드된 파일을 열고 Markdown Desk.app 을 Applications 폴더로 이동
+
+### 🔓 처음 실행
+macOS는 App Store 외부에서 다운로드한 앱을 차단할 수 있습니다.  
+아래 중 하나로 해결하세요.
+
+**방법 A.** Terminal에서 실행:
+```bash
+xattr -rd com.apple.quarantine /Applications/Markdown\ Desk.app
+```
+
+**방법 B.** 앱 아이콘 **우클릭 → 열기** 선택 후 팝업에서 "열기" 클릭
+
+### 📂 기본 앱으로 설정
+
+`.md` 파일을 더블클릭하면 Markdown Desk로 열리도록 설정할 수 있습니다.
+
+1. `.md` 파일을 우클릭 → **정보 가져오기**
+2. **다음으로 열기** 섹션에서 **Markdown Desk** 선택
+3. **모두 변경...** 클릭
 
 ### 🔑 사용 방법
 
@@ -28,6 +48,16 @@
 | `Cmd+S` | 원본 파일에 저장 |
 
 파일을 열면 외부 편집기에서 수정 시 자동으로 내용이 갱신됩니다.
+
+### 🤝 함께 만들어요
+
+누구나 참여할 수 있습니다! 개선 아이디어나 버그 제보 모두 환영합니다.
+
+1. 이 프로젝트를 Fork 합니다
+2. 새 브랜치를 만듭니다 (`git checkout -b amazing-feature`)
+3. 수정 내용을 커밋합니다 (`git commit -m 'Add some amazing feature'`)
+4. 브랜치에 올립니다 (`git push origin amazing-feature`)
+5. Pull Request를 보내주세요
 
 ### 📄 라이선스
 
@@ -53,7 +83,27 @@ A native macOS desktop app that provides all features of [Markdown Viewer](https
 
 ### 📦 Install
 
-Download the latest `.dmg` from [Releases](https://github.com/jhrepo/markdown-desk/releases) and install.
+1. Download the latest `.dmg` from [Releases](https://github.com/jhrepo/markdown-desk/releases)
+2. Open the downloaded file and drag Markdown Desk.app to the Applications folder
+
+### 🔓 First Launch
+macOS may block apps downloaded outside the App Store.
+Use one of the following to resolve:
+
+**Option A.** Run in Terminal:
+```bash
+xattr -rd com.apple.quarantine /Applications/Markdown\ Desk.app
+```
+
+**Option B.** Right-click the app icon → **Open**, then click "Open" in the popup
+
+### 📂 Set as Default App
+
+Set Markdown Desk to open `.md` files by double-click:
+
+1. Right-click a `.md` file → **Get Info**
+2. Under **Open with**, select **Markdown Desk**
+3. Click **Change All...**
 
 ### 🔑 Usage
 
@@ -74,3 +124,13 @@ by [ThisIs-Developer](https://github.com/ThisIs-Developer),
 also licensed under the [Apache License 2.0](https://github.com/ThisIs-Developer/Markdown-Viewer/blob/main/LICENSE).
 
 The macOS desktop wrapper is built with [Tauri](https://tauri.app/).
+
+### 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the project
+2. Create your feature branch (`git checkout -b amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin amazing-feature`)
+5. Open a Pull Request

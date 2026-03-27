@@ -53,6 +53,31 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
         });
 }
 
+/// Open a file directly by path (used by file association, no dialog).
+pub fn open_file_directly(app: &tauri::AppHandle, path: std::path::PathBuf) {
+    dbg_log!("[file-assoc] Opening: {}", path.display());
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            dbg_log!("[file-assoc] Read error: {}", e);
+            return;
+        }
+    };
+
+    let filename = filename_from_path(&path);
+    open_in_new_tab(app, &content, &filename);
+
+    let state = app.state::<WatcherState>();
+    match crate::watcher::add_file(app, &state, path.clone()) {
+        Ok(_) => {
+            dbg_log!("[file-assoc] File added to watch list");
+            persist_watched_path(app, &path);
+        }
+        Err(e) => dbg_log!("[file-assoc] Watcher error: {}", e),
+    }
+}
+
 /// Extract the filename from a path as a String.
 pub(crate) fn filename_from_path(path: &std::path::Path) -> String {
     path.file_name()
