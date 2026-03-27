@@ -24,7 +24,9 @@ pub fn run() {
                 commands::native_open_file,
                 commands::restore_watcher,
                 commands::refresh_active_tab,
-                commands::save_file
+                commands::save_file,
+                commands::export_text_file,
+                commands::export_binary_file,
             ])
         .setup(|app| {
             dbg_log!("Setup: building menu");

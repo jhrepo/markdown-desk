@@ -9,6 +9,7 @@
     "core:event:allow-emit",
     "dialog:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "updater:default",
     "process:allow-restart"
   ]

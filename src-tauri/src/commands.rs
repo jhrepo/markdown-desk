@@ -226,6 +226,76 @@ pub fn save_file(app: tauri::AppHandle, title: String, content: String) {
     }
 }
 
+/// Write text content to a file path. Extracted for testability.
+pub(crate) fn write_text_export(path: &std::path::Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content).map_err(|e| format!("Write error: {}", e))
+}
+
+/// Write binary content to a file path. Extracted for testability.
+pub(crate) fn write_binary_export(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    std::fs::write(path, data).map_err(|e| format!("Write error: {}", e))
+}
+
+/// Tauri IPC command — export text content (MD / HTML) via native save dialog.
+#[tauri::command]
+pub fn export_text_file(
+    app: tauri::AppHandle,
+    default_name: String,
+    content: String,
+    filter_name: String,
+    extensions: Vec<String>,
+) {
+    let exts: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
+    app.dialog()
+        .file()
+        .add_filter(&filter_name, &exts)
+        .set_file_name(&default_name)
+        .save_file(move |path| {
+            let Some(fp) = path else { return };
+            let path = match fp.into_path() {
+                Ok(pb) => pb,
+                Err(e) => {
+                    dbg_log!("[export] Path error: {}", e);
+                    return;
+                }
+            };
+            match write_text_export(&path, &content) {
+                Ok(_) => dbg_log!("[export] Saved: {}", path.display()),
+                Err(e) => dbg_log!("[export] {}", e),
+            }
+        });
+}
+
+/// Tauri IPC command — export binary content (PDF) via native save dialog.
+#[tauri::command]
+pub fn export_binary_file(
+    app: tauri::AppHandle,
+    default_name: String,
+    data: Vec<u8>,
+    filter_name: String,
+    extensions: Vec<String>,
+) {
+    let exts: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
+    app.dialog()
+        .file()
+        .add_filter(&filter_name, &exts)
+        .set_file_name(&default_name)
+        .save_file(move |path| {
+            let Some(fp) = path else { return };
+            let path = match fp.into_path() {
+                Ok(pb) => pb,
+                Err(e) => {
+                    dbg_log!("[export] Path error: {}", e);
+                    return;
+                }
+            };
+            match write_binary_export(&path, &data) {
+                Ok(_) => dbg_log!("[export] Saved: {}", path.display()),
+                Err(e) => dbg_log!("[export] {}", e),
+            }
+        });
+}
+
 pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")
@@ -645,5 +715,116 @@ mod tests {
         let once = escape_js(input);
         let twice = escape_js(&once);
         assert_ne!(once, twice);
+    }
+
+    // --- write_text_export tests ---
+
+    #[test]
+    fn write_text_export_creates_file() {
+        let dir = std::env::temp_dir().join("md_desk_test_text_export");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_export.md");
+        let content = "# Hello\n\nThis is a test.";
+        assert!(write_text_export(&path, content).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_utf8_content() {
+        let dir = std::env::temp_dir().join("md_desk_test_text_utf8");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("한글_export.html");
+        let content = "<h1>안녕하세요</h1>";
+        assert!(write_text_export(&path, content).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_empty_content() {
+        let dir = std::env::temp_dir().join("md_desk_test_text_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.md");
+        assert!(write_text_export(&path, "").is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_overwrites_existing() {
+        let dir = std::env::temp_dir().join("md_desk_test_text_overwrite");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("overwrite.md");
+        std::fs::write(&path, "old content").unwrap();
+        assert!(write_text_export(&path, "new content").is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_invalid_path_returns_error() {
+        let path = Path::new("/nonexistent_dir_12345/file.md");
+        assert!(write_text_export(path, "content").is_err());
+    }
+
+    // --- write_binary_export tests ---
+
+    #[test]
+    fn write_binary_export_creates_file() {
+        let dir = std::env::temp_dir().join("md_desk_test_bin_export");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_export.pdf");
+        let data: Vec<u8> = vec![0x25, 0x50, 0x44, 0x46]; // %PDF
+        assert!(write_binary_export(&path, &data).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_binary_export_empty_data() {
+        let dir = std::env::temp_dir().join("md_desk_test_bin_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.pdf");
+        assert!(write_binary_export(&path, &[]).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap().len(), 0);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_binary_export_large_data() {
+        let dir = std::env::temp_dir().join("md_desk_test_bin_large");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("large.pdf");
+        let data: Vec<u8> = vec![0xAB; 1_000_000]; // 1MB
+        assert!(write_binary_export(&path, &data).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap().len(), 1_000_000);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_binary_export_invalid_path_returns_error() {
+        let path = Path::new("/nonexistent_dir_12345/file.pdf");
+        assert!(write_binary_export(path, &[0x00]).is_err());
+    }
+
+    #[test]
+    fn write_binary_export_overwrites_existing() {
+        let dir = std::env::temp_dir().join("md_desk_test_bin_overwrite");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("overwrite.pdf");
+        std::fs::write(&path, &[0x01, 0x02]).unwrap();
+        let new_data = vec![0x03, 0x04, 0x05];
+        assert!(write_binary_export(&path, &new_data).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), new_data);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
