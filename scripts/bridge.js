@@ -210,12 +210,23 @@
           extensions: [ext]
         });
       };
+      reader.onerror = function() {
+        console.error('[bridge] Failed to read blob for export');
+        if (_origSaveAs) _origSaveAs(blob, filename);
+      };
       reader.readAsText(blob);
     };
 
     // Override jsPDF.save() for PDF export
     document.addEventListener('DOMContentLoaded', function() {
+      var pollCount = 0;
       var waitForJsPDF = setInterval(function() {
+        pollCount++;
+        if (pollCount > 200) { // 10s timeout
+          clearInterval(waitForJsPDF);
+          console.warn('[bridge] jsPDF not found after 10s, PDF export will use browser default');
+          return;
+        }
         var jsPDFClass = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
         if (!jsPDFClass) return;
         clearInterval(waitForJsPDF);

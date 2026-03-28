@@ -92,20 +92,19 @@ fn url_to_path(url: &str) -> std::path::PathBuf {
 
 /// Decode percent-encoded characters in a URL path (e.g., %20 → space, %ED%95%9C → 한).
 fn percent_decode(input: &str) -> String {
-    let mut bytes = Vec::with_capacity(input.len());
-    let mut chars = input.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().and_then(|c| hex_val(c));
-            let lo = chars.next().and_then(|c| hex_val(c));
-            if let (Some(h), Some(l)) = (hi, lo) {
+    let raw = input.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            if let (Some(h), Some(l)) = (hex_val(raw[i + 1]), hex_val(raw[i + 2])) {
                 bytes.push(h << 4 | l);
-            } else {
-                bytes.push(b'%');
+                i += 3;
+                continue;
             }
-        } else {
-            bytes.push(b);
         }
+        bytes.push(raw[i]);
+        i += 1;
     }
     String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
@@ -171,13 +170,14 @@ mod tests {
 
     #[test]
     fn percent_decode_incomplete_sequence() {
-        // Incomplete %XX at end — keep % literal
-        assert_eq!(percent_decode("/file%2"), "/file%");
+        // Incomplete %XX at end — keep characters as-is
+        assert_eq!(percent_decode("/file%2"), "/file%2");
     }
 
     #[test]
     fn percent_decode_invalid_hex() {
-        assert_eq!(percent_decode("/file%ZZ"), "/file%");
+        // Invalid hex digits — keep all characters as-is
+        assert_eq!(percent_decode("/file%ZZ"), "/file%ZZ");
     }
 
     #[test]
@@ -210,5 +210,72 @@ mod tests {
         assert_eq!(hex_val(b'g'), None);
         assert_eq!(hex_val(b'Z'), None);
         assert_eq!(hex_val(b' '), None);
+    }
+
+    // --- url_to_path additional tests ---
+
+    #[test]
+    fn url_to_path_korean_filename() {
+        let path = url_to_path("file:///Users/test/%EB%A9%94%EB%AA%A8.md");
+        assert_eq!(path, std::path::PathBuf::from("/Users/test/메모.md"));
+    }
+
+    #[test]
+    fn url_to_path_special_chars() {
+        let path = url_to_path("file:///Users/test/file%23name%26.md");
+        assert_eq!(path, std::path::PathBuf::from("/Users/test/file#name&.md"));
+    }
+
+    #[test]
+    fn url_to_path_empty_string() {
+        let path = url_to_path("");
+        assert_eq!(path, std::path::PathBuf::from(""));
+    }
+
+    #[test]
+    fn url_to_path_no_path_after_prefix() {
+        let path = url_to_path("file://");
+        assert_eq!(path, std::path::PathBuf::from(""));
+    }
+
+    // --- percent_decode additional tests ---
+
+    #[test]
+    fn percent_decode_consecutive_encoded() {
+        // %2F%2F → //
+        assert_eq!(percent_decode("%2F%2F"), "//");
+    }
+
+    #[test]
+    fn percent_decode_bare_percent_at_end() {
+        assert_eq!(percent_decode("/file%"), "/file%");
+    }
+
+    #[test]
+    fn percent_decode_all_ascii_encoded() {
+        // %41%42%43 → ABC
+        assert_eq!(percent_decode("%41%42%43"), "ABC");
+    }
+
+    #[test]
+    fn percent_decode_mixed_case_hex() {
+        // %2a and %2A both → *
+        assert_eq!(percent_decode("%2a"), "*");
+        assert_eq!(percent_decode("%2A"), "*");
+    }
+
+    #[test]
+    fn percent_decode_japanese() {
+        // テスト in UTF-8: E3 83 86 E3 82 B9 E3 83 88
+        assert_eq!(
+            percent_decode("%E3%83%86%E3%82%B9%E3%83%88"),
+            "テスト"
+        );
+    }
+
+    #[test]
+    fn percent_decode_preserves_plus() {
+        // URL path encoding: + stays as +, not space
+        assert_eq!(percent_decode("/a+b"), "/a+b");
     }
 }

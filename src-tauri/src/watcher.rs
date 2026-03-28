@@ -357,6 +357,47 @@ mod tests {
     }
 
     #[test]
+    fn path_for_title_prefers_exact_match() {
+        let state = WatcherState::new();
+        let path_exact = PathBuf::from("/tmp/README");
+        let path_md = PathBuf::from("/tmp/README.md");
+        state.files.lock().unwrap().insert("README".to_string(), path_exact.clone());
+        state.files.lock().unwrap().insert("README.md".to_string(), path_md.clone());
+        // Exact match "README" should return /tmp/README, not /tmp/README.md
+        assert_eq!(path_for_title(&state, "README"), Some(path_exact));
+    }
+
+    #[test]
+    fn path_for_title_fallback_adds_md() {
+        let state = WatcherState::new();
+        let path = PathBuf::from("/tmp/notes.md");
+        state.files.lock().unwrap().insert("notes.md".to_string(), path.clone());
+        // "notes" should find "notes.md" via fallback
+        assert_eq!(path_for_title(&state, "notes"), Some(path));
+        // "notes.txt" should not match
+        assert_eq!(path_for_title(&state, "notes.txt"), None);
+    }
+
+    #[test]
+    fn path_for_title_unicode_filename() {
+        let state = WatcherState::new();
+        let path = PathBuf::from("/tmp/메모.md");
+        state.files.lock().unwrap().insert("메모.md".to_string(), path.clone());
+        assert_eq!(path_for_title(&state, "메모"), Some(path));
+    }
+
+    #[test]
+    fn stop_watching_after_adding_files() {
+        let state = WatcherState::new();
+        state.files.lock().unwrap().insert("a.md".to_string(), PathBuf::from("/tmp/a.md"));
+        state.files.lock().unwrap().insert("b.md".to_string(), PathBuf::from("/tmp/b.md"));
+        assert_eq!(state.files.lock().unwrap().len(), 2);
+        stop_watching(&state);
+        assert!(state.files.lock().unwrap().is_empty());
+        assert!(state.handle.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn debounce_logic() {
         let last_emit = Arc::new(AtomicU64::new(0));
         let now = now_millis();

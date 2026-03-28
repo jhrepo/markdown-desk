@@ -303,6 +303,8 @@ pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")
         .replace("${", "\\${")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 #[cfg(test)]
@@ -347,7 +349,7 @@ mod tests {
         let md = "# Title\n\n```rust\nfn main() {}\n```\n\nPrice: $100";
         let escaped = escape_js(md);
         assert!(escaped.contains("\\`\\`\\`rust"));
-        assert!(escaped.contains("\\`\\`\\`\n"));
+        assert!(escaped.contains("\\`\\`\\`\\n"));
         assert!(escaped.contains("$100"));
     }
 
@@ -364,7 +366,7 @@ mod tests {
     #[test]
     fn escape_js_multiline() {
         let input = "line1\nline2\nline3";
-        assert_eq!(escape_js(input), "line1\nline2\nline3");
+        assert_eq!(escape_js(input), "line1\\nline2\\nline3");
     }
 
     // --- filename_from_path tests ---
@@ -599,8 +601,24 @@ mod tests {
     }
 
     #[test]
-    fn escape_js_tabs_and_carriage_return() {
-        assert_eq!(escape_js("a\tb\r\n"), "a\tb\r\n");
+    fn escape_js_tabs_preserved() {
+        // Tabs are safe inside template literals
+        assert!(escape_js("a\tb").contains("\t"));
+    }
+
+    #[test]
+    fn escape_js_newlines_escaped() {
+        assert_eq!(escape_js("a\nb"), "a\\nb");
+    }
+
+    #[test]
+    fn escape_js_carriage_return_escaped() {
+        assert_eq!(escape_js("a\rb"), "a\\rb");
+    }
+
+    #[test]
+    fn escape_js_crlf_escaped() {
+        assert_eq!(escape_js("a\r\nb"), "a\\r\\nb");
     }
 
     #[test]
@@ -827,6 +845,72 @@ mod tests {
         let new_data = vec![0x03, 0x04, 0x05];
         assert!(write_binary_export(&path, &new_data).is_ok());
         assert_eq!(std::fs::read(&path).unwrap(), new_data);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_large_content() {
+        let dir = std::env::temp_dir().join("md_desk_test_text_large");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("large.md");
+        let content = "# heading\n".repeat(10_000);
+        assert!(write_text_export(&path, &content).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap().len(), content.len());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_multiline_html() {
+        let dir = std::env::temp_dir().join("md_desk_test_text_html");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("export.html");
+        let content = "<!DOCTYPE html>\n<html>\n<body>\n<h1>Test</h1>\n</body>\n</html>";
+        assert!(write_text_export(&path, content).is_ok());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("<!DOCTYPE html>"));
+        assert!(saved.contains("<h1>Test</h1>"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_text_export_error_message_contains_detail() {
+        let path = Path::new("/nonexistent_dir_12345/file.md");
+        let err = write_text_export(path, "content").unwrap_err();
+        assert!(err.starts_with("Write error:"));
+    }
+
+    #[test]
+    fn write_binary_export_pdf_header_preserved() {
+        let dir = std::env::temp_dir().join("md_desk_test_bin_header");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("header.pdf");
+        // Real PDF header: %PDF-1.4
+        let data = b"%PDF-1.4\n".to_vec();
+        assert!(write_binary_export(&path, &data).is_ok());
+        let saved = std::fs::read(&path).unwrap();
+        assert_eq!(&saved[..5], b"%PDF-");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn write_binary_export_error_message_contains_detail() {
+        let path = Path::new("/nonexistent_dir_12345/file.pdf");
+        let err = write_binary_export(path, &[0x00]).unwrap_err();
+        assert!(err.starts_with("Write error:"));
+    }
+
+    #[test]
+    fn write_binary_export_all_byte_values() {
+        let dir = std::env::temp_dir().join("md_desk_test_bin_allbytes");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("allbytes.bin");
+        let data: Vec<u8> = (0u8..=255).collect();
+        assert!(write_binary_export(&path, &data).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), data);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }

@@ -85,4 +85,50 @@ mod tests {
     fn format_log_line_empty_msg() {
         assert_eq!(format_log_line("0.000", ""), "[0.000] \n");
     }
+
+    #[test]
+    fn format_log_line_unicode() {
+        let line = format_log_line("1.000", "한글 메시지");
+        assert!(line.contains("한글 메시지"));
+        assert!(line.starts_with('['));
+        assert!(line.ends_with('\n'));
+    }
+
+    #[test]
+    fn format_log_line_special_chars() {
+        let line = format_log_line("1.000", "path: /a/b\ttab");
+        assert_eq!(line, "[1.000] path: /a/b\ttab\n");
+    }
+
+    // --- cache_dir tests ---
+
+    #[test]
+    fn cache_dir_returns_library_caches() {
+        // HOME is normally set on macOS
+        if std::env::var("HOME").is_ok() {
+            let dir = cache_dir();
+            assert!(dir.to_string_lossy().ends_with("Library/Caches"));
+        }
+    }
+
+    #[test]
+    fn cache_dir_fallback_without_home() {
+        // Temporarily unset HOME to test fallback
+        let original = std::env::var("HOME").ok();
+        std::env::remove_var("HOME");
+        let dir = cache_dir();
+        assert_eq!(dir, std::path::PathBuf::from("/tmp"));
+        // Restore
+        if let Some(home) = original {
+            std::env::set_var("HOME", home);
+        }
+    }
+
+    #[test]
+    fn chrono_now_is_recent() {
+        let ts = chrono_now();
+        let secs: u64 = ts.split('.').next().unwrap().parse().unwrap();
+        // Should be after 2024-01-01 (1704067200)
+        assert!(secs > 1_704_067_200);
+    }
 }
