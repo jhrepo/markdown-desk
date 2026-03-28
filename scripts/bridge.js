@@ -184,6 +184,60 @@
     window.location.reload();
   }
 
+  // --- Export overrides: use Tauri native save dialog instead of browser download ---
+  if (window.__TAURI_INTERNALS__) {
+    function getExportBaseName() {
+      var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
+      var name = activeEl ? activeEl.textContent.trim() : 'document';
+      return name.replace(/\.md$/i, '') || 'document';
+    }
+
+    // Override FileSaver.js saveAs() for MD and HTML exports
+    var _origSaveAs = window.saveAs;
+    window.saveAs = function(blob, filename) {
+      if (!window.__TAURI_INTERNALS__) {
+        return _origSaveAs && _origSaveAs(blob, filename);
+      }
+      var baseName = getExportBaseName();
+      var ext = (filename || '').split('.').pop() || 'md';
+      var filterName = ext === 'html' ? 'HTML' : 'Markdown';
+      var reader = new FileReader();
+      reader.onload = function() {
+        window.__TAURI_INTERNALS__.invoke('export_text_file', {
+          defaultName: baseName + '.' + ext,
+          content: reader.result,
+          filterName: filterName,
+          extensions: [ext]
+        });
+      };
+      reader.readAsText(blob);
+    };
+
+    // Override jsPDF.save() for PDF export
+    document.addEventListener('DOMContentLoaded', function() {
+      var waitForJsPDF = setInterval(function() {
+        var jsPDFClass = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+        if (!jsPDFClass) return;
+        clearInterval(waitForJsPDF);
+        var _origPdfSave = jsPDFClass.prototype.save;
+        jsPDFClass.prototype.save = function(filename) {
+          if (!window.__TAURI_INTERNALS__) {
+            return _origPdfSave.call(this, filename);
+          }
+          var baseName = getExportBaseName();
+          var pdfBytes = this.output('arraybuffer');
+          var uint8 = new Uint8Array(pdfBytes);
+          window.__TAURI_INTERNALS__.invoke('export_binary_file', {
+            defaultName: baseName + '.pdf',
+            data: Array.from(uint8),
+            filterName: 'PDF',
+            extensions: ['pdf']
+          });
+        };
+      }, 50);
+    });
+  }
+
   // --- Keyboard shortcuts ---
 
   // Cmd+S → save to original file
