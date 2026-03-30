@@ -114,11 +114,14 @@
           var vbH = parseFloat(parts[3]) || 300;
 
           // Set explicit dimensions instead of 'auto' (WKWebView fix)
-          svg.style.width = vbW + 'px';
-          svg.style.height = vbH + 'px';
-          svg.style.maxWidth = '80vw';
-          svg.style.maxHeight = '60vh';
-          svg.style.aspectRatio = vbW + ' / ' + vbH;
+          // Calculate size to fit within 80vw x 60vh while preserving aspect ratio
+          var maxW = window.innerWidth * 0.8;
+          var maxH = window.innerHeight * 0.6;
+          var scale = Math.min(maxW / vbW, maxH / vbH, 1);
+          svg.style.width = (vbW * scale) + 'px';
+          svg.style.height = (vbH * scale) + 'px';
+          // Disable transition to prevent flicker during drag/pan
+          svg.style.transition = 'none';
         }
       });
       observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
