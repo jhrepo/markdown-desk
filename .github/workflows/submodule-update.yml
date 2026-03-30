@@ -17,34 +17,59 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Check for submodule updates
+      - name: Check for deployed updates
         id: check
+        run: |
+          # Get the latest successful Production deployment SHA
+          DEPLOYED=$(curl -sf "https://api.github.com/repos/ThisIs-Developer/Markdown-Viewer/deployments?environment=Production&per_page=1" \
+            | jq -r '.[0].sha // empty')
+
+          if [ -z "$DEPLOYED" ]; then
+            echo "No Production deployment found"
+            echo "updated=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          LOCAL=$(cd Markdown-Viewer && git rev-parse HEAD)
+
+          if [ "$LOCAL" != "$DEPLOYED" ]; then
+            # Verify the deployment was successful
+            DEPLOY_ID=$(curl -sf "https://api.github.com/repos/ThisIs-Developer/Markdown-Viewer/deployments?environment=Production&per_page=1" \
+              | jq -r '.[0].id // empty')
+            STATE=$(curl -sf "https://api.github.com/repos/ThisIs-Developer/Markdown-Viewer/deployments/${DEPLOY_ID}/statuses" \
+              | jq -r '.[0].state // empty')
+
+            if [ "$STATE" = "success" ]; then
+              echo "updated=true" >> $GITHUB_OUTPUT
+              echo "deployed_sha=$DEPLOYED" >> $GITHUB_OUTPUT
+              echo "Production deployment updated: $LOCAL -> $DEPLOYED"
+            else
+              echo "updated=false" >> $GITHUB_OUTPUT
+              echo "Latest deployment state: $STATE (not success)"
+            fi
+          else
+            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "Submodule already at latest deployment"
+          fi
+
+      - name: Update submodule to deployed commit
+        if: steps.check.outputs.updated == 'true'
         run: |
           cd Markdown-Viewer
           git fetch origin
-          LOCAL=$(git rev-parse HEAD)
-          REMOTE=$(git rev-parse origin/main)
-          if [ "$LOCAL" != "$REMOTE" ]; then
-            echo "updated=true" >> $GITHUB_OUTPUT
-            echo "Submodule has updates: $LOCAL -> $REMOTE"
-          else
-            echo "updated=false" >> $GITHUB_OUTPUT
-            echo "Submodule is up to date"
-          fi
-
-      - name: Update submodule
-        if: steps.check.outputs.updated == 'true'
-        run: |
-          git submodule update --remote Markdown-Viewer
+          git checkout ${{ steps.check.outputs.deployed_sha }}
+          cd ..
 
       - name: Create Pull Request
         if: steps.check.outputs.updated == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           branch: auto/submodule-update
-          title: 'Update Markdown-Viewer submodule'
+          title: 'Update Markdown-Viewer submodule (deployed)'
           body: |
-            Automated update of the Markdown-Viewer submodule to latest upstream.
+            Automated update of the Markdown-Viewer submodule to latest **Production deployment**.
+
+            Deployed commit: `${{ steps.check.outputs.deployed_sha }}`
 
             Please verify:
             - [ ] App builds successfully
