@@ -93,6 +93,37 @@
     if (tabList) { tabList.addEventListener('click', onTabClick); }
     if (mobileTabList) { mobileTabList.addEventListener('click', onTabClick); }
 
+    // Fix mermaid zoom modal SVG sizing for WKWebView
+    // WKWebView resolves SVG width:auto to 0 inside flex containers
+    (function() {
+      var modal = document.getElementById('mermaid-zoom-modal');
+      var modalDiagram = document.getElementById('mermaid-modal-diagram');
+      if (!modal || !modalDiagram) return;
+
+      var observer = new MutationObserver(function() {
+        if (!modal.classList.contains('active')) return;
+        var svg = modalDiagram.querySelector('svg');
+        if (!svg || svg.getAttribute('data-bridge-fixed')) return;
+        svg.setAttribute('data-bridge-fixed', 'true');
+
+        // Read intrinsic size from viewBox
+        var vb = svg.getAttribute('viewBox');
+        if (vb) {
+          var parts = vb.split(/[\s,]+/);
+          var vbW = parseFloat(parts[2]) || 500;
+          var vbH = parseFloat(parts[3]) || 300;
+
+          // Set explicit dimensions instead of 'auto' (WKWebView fix)
+          svg.style.width = vbW + 'px';
+          svg.style.height = vbH + 'px';
+          svg.style.maxWidth = '80vw';
+          svg.style.maxHeight = '60vh';
+          svg.style.aspectRatio = vbW + ' / ' + vbH;
+        }
+      });
+      observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
+    })();
+
     // Override file-input click to use native dialog
     var fileInput = document.getElementById('file-input');
     if (fileInput) {
