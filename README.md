@@ -13,8 +13,9 @@
 ### ✨ 추가 기능
 
 - **파일 변경 감시(Live Reload)** — 열린 파일이 외부 편집기에서 수정되면 자동으로 내용이 갱신됩니다.
-- **네이티브 파일 열기/저장** — `Cmd+O`로 파일 열기, `Cmd+S`로 원본 파일에 저장.
+- **네이티브 파일 열기/저장/찾기** — `Cmd+O`로 파일 열기, `Cmd+S`로 저장, `Cmd+F`로 텍스트 찾기.
 - **원본 추적** — Markdown Viewer 원본 소스를 Git 서브모듈로 추적하며, 업스트림 업데이트를 반영합니다.
+- **텍스트 찾기** — `Cmd+F`로 프리뷰 영역에서 텍스트를 검색하고, `Enter`/`Shift+Enter`로 이동할 수 있습니다.
 - **자동 업데이트** — 앱 시작 시 새 버전을 확인하고, 메뉴에서 수동 확인도 가능합니다.
 
 ### 📦 설치
@@ -47,6 +48,7 @@ xattr -rd com.apple.quarantine /Applications/Markdown\ Desk.app
 |--------|------|
 | `Cmd+O` | 마크다운 파일 열기 |
 | `Cmd+S` | 원본 파일에 저장 |
+| `Cmd+F` | 프리뷰에서 텍스트 찾기 |
 
 파일을 열면 외부 편집기에서 수정 시 자동으로 내용이 갱신됩니다.
 
@@ -79,8 +81,9 @@ A native macOS desktop app that provides all features of [Markdown Viewer](https
 ### ✨ Additional Features
 
 - **Live Reload** — Automatically refreshes when an open file is modified by an external editor.
-- **Native File Open/Save** — `Cmd+O` to open files, `Cmd+S` to save to the original file.
+- **Native File Open/Save/Find** — `Cmd+O` to open, `Cmd+S` to save, `Cmd+F` to find text.
 - **Tracks Upstream** — Includes the original Markdown Viewer source as a Git submodule and periodically merges upstream updates.
+- **Find in Page** — `Cmd+F` to search text in the preview pane, navigate with `Enter`/`Shift+Enter`.
 - **Auto Update** — Checks for new versions on startup, with manual check available from the menu.
 
 ### 📦 Install
@@ -113,6 +116,7 @@ Set Markdown Desk to open `.md` files by double-click:
 |----------|--------|
 | `Cmd+O` | Open markdown file |
 | `Cmd+S` | Save to original file |
+| `Cmd+F` | Find text in preview |
 
 Opened files are automatically refreshed when modified by an external editor.
 

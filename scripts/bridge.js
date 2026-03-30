@@ -280,6 +280,226 @@
     });
   }
 
+  // --- Find in page (Cmd+F) ---
+  (function() {
+    var findBar = null;
+    var findInput = null;
+    var findCount = null;
+    var matches = [];
+    var currentIdx = -1;
+    var HIGHLIGHT_CLASS = 'bridge-find-highlight';
+    var ACTIVE_CLASS = 'bridge-find-active';
+
+    // Inject CSS
+    var style = document.createElement('style');
+    style.textContent =
+      '.bridge-find-bar{position:fixed;top:0;right:0;z-index:9999;display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--bg-color,#fff);border:1px solid var(--border-color,#ccc);border-top:none;border-radius:0 0 0 8px;box-shadow:0 2px 8px rgba(0,0,0,.15);font-size:13px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;}' +
+      '.bridge-find-bar input{width:200px;padding:4px 8px;border:1px solid var(--border-color,#ccc);border-radius:4px;outline:none;font-size:13px;background:var(--editor-bg,#fff);color:var(--text-color,#333);}' +
+      '.bridge-find-bar input:focus{border-color:var(--accent-color,#0969da);}' +
+      '.bridge-find-bar button{padding:4px 8px;border:1px solid var(--border-color,#ccc);border-radius:4px;background:var(--button-bg,#f0f0f0);color:var(--text-color,#333);cursor:pointer;font-size:12px;line-height:1;}' +
+      '.bridge-find-bar button:hover{background:var(--border-color,#ddd);}' +
+      '.bridge-find-bar .bridge-find-count{color:var(--text-color,#666);font-size:12px;min-width:60px;text-align:center;}' +
+      '.' + HIGHLIGHT_CLASS + '{background:rgba(255,200,0,.4);border-radius:2px;}' +
+      '.' + ACTIVE_CLASS + '{background:rgba(255,150,0,.6);border-radius:2px;outline:2px solid rgba(255,120,0,.8);}';
+    document.head.appendChild(style);
+
+    function createFindBar() {
+      findBar = document.createElement('div');
+      findBar.className = 'bridge-find-bar';
+
+      findInput = document.createElement('input');
+      findInput.type = 'text';
+      findInput.placeholder = 'Find...';
+      findInput.setAttribute('aria-label', 'Find in page');
+
+      findCount = document.createElement('span');
+      findCount.className = 'bridge-find-count';
+      findCount.textContent = '';
+
+      var btnPrev = document.createElement('button');
+      btnPrev.textContent = '\u25B2';
+      btnPrev.title = 'Previous (Shift+Enter)';
+      btnPrev.setAttribute('aria-label', 'Previous match');
+      btnPrev.addEventListener('click', function() { navigateMatch(-1); });
+
+      var btnNext = document.createElement('button');
+      btnNext.textContent = '\u25BC';
+      btnNext.title = 'Next (Enter)';
+      btnNext.setAttribute('aria-label', 'Next match');
+      btnNext.addEventListener('click', function() { navigateMatch(1); });
+
+      var btnClose = document.createElement('button');
+      btnClose.textContent = '\u2715';
+      btnClose.title = 'Close (Esc)';
+      btnClose.setAttribute('aria-label', 'Close find bar');
+      btnClose.addEventListener('click', function() { closeFindBar(); });
+
+      findBar.appendChild(findInput);
+      findBar.appendChild(findCount);
+      findBar.appendChild(btnPrev);
+      findBar.appendChild(btnNext);
+      findBar.appendChild(btnClose);
+
+      var searchTimer = null;
+      findInput.addEventListener('input', function() {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(function() { doSearch(findInput.value); }, 150);
+      });
+      findInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          navigateMatch(e.shiftKey ? -1 : 1);
+        } else if (e.key === 'Escape') {
+          closeFindBar();
+        }
+      });
+
+      document.body.appendChild(findBar);
+    }
+
+    function openFindBar() {
+      // Don't open find bar when mermaid modal is active
+      var modal = document.getElementById('mermaid-zoom-modal');
+      if (modal && modal.classList.contains('active')) return;
+      if (!findBar) createFindBar();
+      findBar.style.display = 'flex';
+      findInput.focus();
+      findInput.select();
+    }
+
+    function closeFindBar() {
+      if (!findBar) return;
+      findBar.style.display = 'none';
+      clearHighlights();
+      findInput.value = '';
+      findCount.textContent = '';
+      matches = [];
+      currentIdx = -1;
+    }
+
+    function clearHighlights() {
+      var preview = document.getElementById('markdown-preview');
+      if (!preview) return;
+      var marks = preview.querySelectorAll('.' + HIGHLIGHT_CLASS);
+      for (var i = marks.length - 1; i >= 0; i--) {
+        var mark = marks[i];
+        var parent = mark.parentNode;
+        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+        parent.normalize();
+      }
+    }
+
+    function doSearch(query) {
+      clearHighlights();
+      matches = [];
+      currentIdx = -1;
+
+      if (!query) {
+        findCount.textContent = '';
+        return;
+      }
+
+      var preview = document.getElementById('markdown-preview');
+      if (!preview) return;
+
+      var walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, null, false);
+      var textNodes = [];
+      var node;
+      while (node = walker.nextNode()) {
+        if (node.nodeValue.trim()) textNodes.push(node);
+      }
+
+      var lowerQuery = query.toLowerCase();
+      for (var i = 0; i < textNodes.length; i++) {
+        var textNode = textNodes[i];
+        var text = textNode.nodeValue;
+        var lowerText = text.toLowerCase();
+        var idx = 0;
+        var parts = [];
+        var lastEnd = 0;
+
+        while ((idx = lowerText.indexOf(lowerQuery, idx)) !== -1) {
+          if (idx > lastEnd) {
+            parts.push({ text: text.substring(lastEnd, idx), match: false });
+          }
+          parts.push({ text: text.substring(idx, idx + query.length), match: true });
+          lastEnd = idx + query.length;
+          idx = lastEnd;
+        }
+
+        if (parts.length > 0) {
+          if (lastEnd < text.length) {
+            parts.push({ text: text.substring(lastEnd), match: false });
+          }
+          var frag = document.createDocumentFragment();
+          for (var j = 0; j < parts.length; j++) {
+            if (parts[j].match) {
+              var span = document.createElement('span');
+              span.className = HIGHLIGHT_CLASS;
+              span.textContent = parts[j].text;
+              matches.push(span);
+              frag.appendChild(span);
+            } else {
+              frag.appendChild(document.createTextNode(parts[j].text));
+            }
+          }
+          textNode.parentNode.replaceChild(frag, textNode);
+        }
+      }
+
+      findCount.textContent = matches.length > 0 ? '0/' + matches.length : 'No results';
+      if (matches.length > 0) {
+        navigateMatch(1);
+      }
+    }
+
+    function navigateMatch(direction) {
+      if (matches.length === 0) return;
+
+      // Stale DOM check: if highlights were removed (Live Reload, Mermaid re-render), re-search
+      if (matches[0] && !document.contains(matches[0])) {
+        doSearch(findInput.value);
+        return;
+      }
+
+      if (currentIdx >= 0 && currentIdx < matches.length) {
+        matches[currentIdx].className = HIGHLIGHT_CLASS;
+      }
+
+      currentIdx += direction;
+      if (currentIdx >= matches.length) currentIdx = 0;
+      if (currentIdx < 0) currentIdx = matches.length - 1;
+
+      matches[currentIdx].className = HIGHLIGHT_CLASS + ' ' + ACTIVE_CLASS;
+      matches[currentIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      findCount.textContent = (currentIdx + 1) + '/' + matches.length;
+    }
+
+    // Cmd+F → open find bar
+    document.addEventListener('keydown', function(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        e.stopPropagation();
+        openFindBar();
+      }
+    }, true);
+
+    // Esc → close find bar (global, for when focus is elsewhere)
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && findBar && findBar.style.display !== 'none') {
+        closeFindBar();
+      }
+    });
+
+    // Close find bar on tab switch or view mode change
+    // Use event delegation on document since bridge.js runs before DOM is ready
+    document.addEventListener('click', function(e) {
+      if (!findBar || findBar.style.display === 'none') return;
+      var target = e.target.closest('.tab-item, .view-mode-btn, .mobile-view-mode-btn');
+      if (target) closeFindBar();
+    });
+  })();
+
   // --- Keyboard shortcuts ---
 
   // Cmd+S → save to original file
