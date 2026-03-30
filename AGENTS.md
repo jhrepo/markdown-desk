@@ -36,6 +36,33 @@ git tag v$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*"\([0
 git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 ```
 
+## Manual QA Checklist
+
+릴리스 전 앱을 실행하여 아래 항목을 확인한다.
+
+### 파일 열기/저장
+- [ ] `Cmd+O`로 .md 파일 열기 → 내용이 프리뷰에 표시
+- [ ] 외부 편집기에서 파일 수정 → Live Reload로 자동 갱신
+- [ ] `Cmd+S`로 저장 → 원본 파일에 반영
+
+### Export
+- [ ] Export > Markdown → 네이티브 저장 다이얼로그, 파일 정상 저장
+- [ ] Export > HTML → 동일 확인
+- [ ] Export > PDF → 동일 확인
+
+### Mermaid 다이어그램
+- [ ] Mermaid 코드 블록이 다이어그램으로 렌더링
+- [ ] 펼쳐보기(Zoom) 버튼 클릭 → 모달에서 다이어그램 정상 표시
+- [ ] 모달 닫기 후 다른 다이어그램 펼쳐보기 → 정상 동작
+
+### 테마/UI
+- [ ] 테마 토글(라이트/다크) → 재시작 후에도 유지
+- [ ] 탭 여러 개 열기/닫기/전환 정상
+- [ ] Reset 버튼 → 상태 초기화 후 새로고침
+
+### 업데이트
+- [ ] 메뉴 > Check for Updates → 다이얼로그 표시
+
 ## Architecture
 
 - `src-tauri/src/` — Rust 백엔드 (commands, watcher, menu, logger)
