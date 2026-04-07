@@ -128,7 +128,9 @@ pub(crate) fn js_update_tab(content: &str, filename: &str) -> String {
             if (activeTitle !== titleMatch && activeTitle !== filename) return;
             var editor = document.getElementById('markdown-editor');
             if (editor) {{
-                editor.value = `{}`;
+                var newContent = `{}`;
+                if (editor.value === newContent) return;
+                editor.value = newContent;
                 editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 setTimeout(function() {{
                     editor.scrollTop = 0;
@@ -683,6 +685,12 @@ mod tests {
     fn js_new_tab_sets_file_type() {
         let js = js_new_tab("content", "f.md");
         assert!(js.contains("text/markdown"));
+    }
+
+    #[test]
+    fn js_update_tab_skips_when_content_unchanged() {
+        let js = js_update_tab("content", "test.md");
+        assert!(js.contains("if (editor.value === newContent) return"));
     }
 
     // --- js_update_tab edge cases ---
