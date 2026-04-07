@@ -301,6 +301,19 @@ pub fn export_binary_file(
         });
 }
 
+#[tauri::command]
+pub fn is_default_md_app() -> bool {
+    let result = crate::default_app::is_default_md_handler("com.markdowndesk.app");
+    dbg_log!("[cmd] is_default_md_app: {}", result);
+    result
+}
+
+#[tauri::command]
+pub fn set_default_md_app() -> Result<(), String> {
+    dbg_log!("[cmd] set_default_md_app");
+    crate::default_app::set_as_default_md_handler("com.markdowndesk.app")
+}
+
 pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")

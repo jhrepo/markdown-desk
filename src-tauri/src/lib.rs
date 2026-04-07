@@ -1,4 +1,5 @@
 mod commands;
+mod default_app;
 #[macro_use]
 mod logger;
 mod menu;
@@ -27,6 +28,8 @@ pub fn run() {
                 commands::save_file,
                 commands::export_text_file,
                 commands::export_binary_file,
+                commands::is_default_md_app,
+                commands::set_default_md_app,
             ])
         .setup(|app| {
             dbg_log!("Setup: building menu");

@@ -12,5 +12,8 @@ notify = "7"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -205,16 +205,47 @@
       _updateChecking = false;
     }
   }
-  // Auto-check on startup (silent, no feedback if up-to-date)
-  setTimeout(function() { doCheckForUpdates(false); }, 3000);
+  // --- Default app prompt (once per version; re-asks after update) ---
+  var DEFAULT_APP_DISMISSED_KEY = 'markdown-desk-default-app-dismissed';
+  async function promptDefaultApp() {
+    if (!window.__TAURI__ || !window.__TAURI__.dialog || !window.__TAURI_INTERNALS__) return;
+    try {
+      var isDefault = await window.__TAURI_INTERNALS__.invoke('is_default_md_app');
+      if (isDefault) return;
+      // %%APP_VERSION%% is replaced with the actual version at build time
+      // by scripts/prepare-frontend.sh (e.g. '26.4.1')
+      var currentVersion = '%%APP_VERSION%%';
+      if (currentVersion.indexOf('%%') === 0) return; // build-time injection failed
+      var dismissedVersion = localStorage.getItem(DEFAULT_APP_DISMISSED_KEY);
+      if (dismissedVersion === currentVersion) return;
+      var confirmed = await window.__TAURI__.dialog.confirm(
+        'Would you like to set Markdown Desk as the default app for Markdown files?',
+        { title: 'Markdown Desk', kind: 'info' }
+      );
+      if (confirmed) {
+        await window.__TAURI_INTERNALS__.invoke('set_default_md_app');
+        localStorage.removeItem(DEFAULT_APP_DISMISSED_KEY);
+      } else {
+        localStorage.setItem(DEFAULT_APP_DISMISSED_KEY, currentVersion);
+      }
+    } catch (e) {
+      console.error('[bridge] default app prompt failed:', e);
+    }
+  }
 
-  // --- Hard reload: clear all state except theme ---
+  // Auto-check on startup: default app prompt first, then update check
+  setTimeout(async function() {
+    await promptDefaultApp();
+    doCheckForUpdates(false);
+  }, 2000);
+
+  // --- Hard reload: clear all state except theme and default-app dismissed ---
   function hardReload() {
     var theme = localStorage.getItem(THEME_KEY);
+    var dismissed = localStorage.getItem(DEFAULT_APP_DISMISSED_KEY);
     localStorage.clear();
-    if (theme) {
-      localStorage.setItem(THEME_KEY, theme);
-    }
+    if (theme) localStorage.setItem(THEME_KEY, theme);
+    if (dismissed) localStorage.setItem(DEFAULT_APP_DISMISSED_KEY, dismissed);
     window.location.reload();
   }
 
