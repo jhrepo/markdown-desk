@@ -36,6 +36,8 @@ git tag v$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*"\([0
 git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 ```
 
+- `release.yml`의 `generate_release_notes: true`는 항상 유지할 것 (GitHub "Full Changelog" 비교 링크 생성용)
+
 ## Manual QA Checklist
 
 릴리스 전 앱을 실행하여 아래 항목을 확인한다.
