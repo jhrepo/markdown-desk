@@ -1,42 +1,7 @@
 // bridge.js — Tauri ↔ Web app bridge
 // Injected into <head> via prepare-frontend.sh (runs before original scripts)
 (function() {
-  var THEME_KEY = 'markdown-desk-theme';
-
-  // --- Theme persistence ---
-  var savedTheme = localStorage.getItem(THEME_KEY);
-  if (savedTheme) {
-    // Apply saved theme immediately (prevents flash)
-    document.documentElement.setAttribute('data-theme', savedTheme);
-
-    // Override matchMedia so the original script's prefers-color-scheme check
-    // returns the saved preference instead of the system setting
-    var originalMatchMedia = window.matchMedia;
-    window.matchMedia = function(query) {
-      if (query === '(prefers-color-scheme: dark)') {
-        return {
-          matches: savedTheme === 'dark',
-          media: query,
-          addEventListener: function() {},
-          removeEventListener: function() {}
-        };
-      }
-      return originalMatchMedia.call(window, query);
-    };
-  }
-
   document.addEventListener('DOMContentLoaded', function() {
-    // Save theme when user clicks the toggle button
-    var toggle = document.getElementById('theme-toggle');
-    if (toggle) {
-      toggle.addEventListener('click', function() {
-        setTimeout(function() {
-          var theme = document.documentElement.getAttribute('data-theme');
-          localStorage.setItem(THEME_KEY, theme);
-        }, 0);
-      });
-    }
-
     // Override Reset buttons to hard reload
     var resetBtn = document.getElementById('tab-reset-btn');
     if (resetBtn) {
@@ -239,12 +204,13 @@
     doCheckForUpdates(false);
   }, 2000);
 
-  // --- Hard reload: clear all state except theme and default-app dismissed ---
+  // --- Hard reload: clear all state except global state and default-app dismissed ---
+  var GLOBAL_STATE_KEY = 'markdownViewerGlobalState';
   function hardReload() {
-    var theme = localStorage.getItem(THEME_KEY);
+    var globalState = localStorage.getItem(GLOBAL_STATE_KEY);
     var dismissed = localStorage.getItem(DEFAULT_APP_DISMISSED_KEY);
     localStorage.clear();
-    if (theme) localStorage.setItem(THEME_KEY, theme);
+    if (globalState) localStorage.setItem(GLOBAL_STATE_KEY, globalState);
     if (dismissed) localStorage.setItem(DEFAULT_APP_DISMISSED_KEY, dismissed);
     window.location.reload();
   }
