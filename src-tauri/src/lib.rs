@@ -15,10 +15,15 @@ pub fn run() {
     logger::init();
     dbg_log!("App starting...");
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_process::init());
+
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(tauri_plugin_webdriver::init());
+
+    let app = builder
         .manage(watcher::WatcherState::new())
         .manage(PendingFiles(Mutex::new(Vec::new())))
         .invoke_handler(tauri::generate_handler![

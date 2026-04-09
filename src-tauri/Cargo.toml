@@ -17,3 +17,6 @@ core-foundation = "0.10"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[target.'cfg(debug_assertions)'.dependencies]
+tauri-plugin-webdriver = "0.2"

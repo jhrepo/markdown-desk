@@ -18,7 +18,13 @@ npm run tauri build        # 릴리스 빌드 (서명 키 필요)
 ## Test
 
 ```bash
-cd src-tauri && cargo test --lib
+cd src-tauri && cargo test --lib    # Rust 유닛 테스트
+npm run test:e2e                     # E2E 테스트 (debug 빌드 필요)
+```
+
+E2E 테스트 실행 전 debug 빌드가 필요하다:
+```bash
+npm run tauri build -- --debug
 ```
 
 ## Versioning
@@ -40,7 +46,7 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 
 ## Manual QA Checklist
 
-릴리스 전 앱을 실행하여 아래 항목을 확인한다.
+릴리스 전 앱을 실행하여 아래 항목을 확인한다. ✅ 표시 항목은 `npm run test:e2e`로 자동 검증된다.
 
 ### 파일 열기/저장
 - [ ] `Cmd+O`로 .md 파일 열기 → 내용이 프리뷰에 표시
@@ -53,24 +59,29 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - [ ] Export > PDF → 동일 확인
 
 ### Mermaid 다이어그램
-- [ ] Mermaid 코드 블록이 다이어그램으로 렌더링
-- [ ] 펼쳐보기(Zoom) 버튼 클릭 → 모달에서 다이어그램 정상 표시
+- [ ] Mermaid 코드 블록이 다이어그램으로 렌더링 ✅
+- [ ] 펼쳐보기(Zoom) 버튼 클릭 → 모달에서 다이어그램 정상 표시 ✅
 - [ ] 모달에서 드래그(패닝) → 부드럽게 이동, 깜빡임 없음
 - [ ] 모달에서 줌 인/아웃 → 정상 동작
 - [ ] 모달 닫기 후 다른 다이어그램 펼쳐보기 → 정상 동작
 
 ### 테마/UI
-- [ ] 테마 토글(라이트/다크) → 재시작 후에도 유지
-- [ ] 탭 여러 개 열기/닫기/전환 정상
-- [ ] Reset 버튼 → 상태 초기화 후 새로고침
+- [ ] 테마 토글(라이트/다크) → 재시작 후에도 유지 ✅
+- [ ] 탭 여러 개 열기/닫기/전환 정상 ✅
+- [ ] Reset 버튼 → 상태 초기화 후 새로고침 ✅
 
 ### 텍스트 찾기
-- [ ] `Cmd+F` → 검색 바 표시, 프리뷰에서 하이라이트
-- [ ] `Enter`/`Shift+Enter` → 다음/이전 매치 이동
-- [ ] `Esc` 또는 X 버튼 → 검색 바 닫기, 하이라이트 제거
-- [ ] 탭 전환 시 → 검색 바 자동 닫기
-- [ ] 뷰 모드 변경(Editor/Split/Preview) 시 → 검색 바 자동 닫기
-- [ ] Mermaid 모달 열린 상태에서 `Cmd+F` → 검색 바 열리지 않음
+- [ ] `Cmd+F` → 검색 바 표시, 프리뷰에서 하이라이트 ✅
+- [ ] `Enter`/`Shift+Enter` → 다음/이전 매치 이동 ✅
+- [ ] `Esc` 또는 X 버튼 → 검색 바 닫기, 하이라이트 제거 ✅
+- [ ] 탭 전환 시 → 검색 바 자동 닫기 ✅
+- [ ] 뷰 모드 변경(Editor/Split/Preview) 시 → 검색 바 자동 닫기 ✅
+- [ ] Mermaid 모달 열린 상태에서 `Cmd+F` → 검색 바 열리지 않음 ✅
+
+### 기본 앱 설정
+- [ ] 첫 설치 또는 업데이트 후 기본 앱이 아니면 → 설정 다이얼로그 표시
+- [ ] 다이얼로그에서 확인 → 기본 앱으로 설정
+- [ ] 다이얼로그에서 취소 → 같은 버전에서 다시 묻지 않음
 
 ### 업데이트
 - [ ] 메뉴 > Check for Updates → 다이얼로그 표시
