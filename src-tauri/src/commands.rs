@@ -30,11 +30,12 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
                 };
 
                 match read_and_prepare_file(&path) {
-                    Ok((content, filename)) => {
-                        dbg_log!("[open] {} bytes from {}", content.len(), filename);
-                        open_in_new_tab(&app_handle, &content, &filename);
-
+                    Ok((content, _filename)) => {
                         let state = app_handle.state::<WatcherState>();
+                        let display = display_name_for_file(&path, &state);
+                        dbg_log!("[open] {} bytes from {}", content.len(), display);
+                        open_in_new_tab(&app_handle, &content, &display);
+
                         match crate::watcher::add_file(&app_handle, &state, path.clone()) {
                             Ok(_) => {
                                 dbg_log!("[open] File added to watch list");
@@ -54,10 +55,11 @@ pub fn open_file_directly(app: &tauri::AppHandle, path: std::path::PathBuf) {
     dbg_log!("[file-assoc] Opening: {}", path.display());
 
     match read_and_prepare_file(&path) {
-        Ok((content, filename)) => {
-            open_in_new_tab(app, &content, &filename);
-
+        Ok((content, _filename)) => {
             let state = app.state::<WatcherState>();
+            let display = display_name_for_file(&path, &state);
+            open_in_new_tab(app, &content, &display);
+
             match crate::watcher::add_file(app, &state, path.clone()) {
                 Ok(_) => {
                     dbg_log!("[file-assoc] File added to watch list");
@@ -92,6 +94,30 @@ pub(crate) fn filename_from_path(path: &std::path::Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string()
+}
+
+/// Generate a display name for a file, adding parent directory prefix if
+/// another file with the same filename is already open.
+pub(crate) fn display_name_for_file(
+    path: &std::path::Path,
+    state: &crate::watcher::WatcherState,
+) -> String {
+    let filename = filename_from_path(path);
+    let files = match state.files.lock() {
+        Ok(f) => f,
+        Err(_) => return filename,
+    };
+    // Check if any existing entry has the same filename but different path
+    let has_conflict = files.values().any(|existing| {
+        filename_from_path(existing) == filename && existing != path
+    });
+    if has_conflict {
+        // Prefix with parent directory name: "dir/filename.md"
+        if let Some(parent) = path.parent().and_then(|p| p.file_name()) {
+            return format!("{}/{}", parent.to_string_lossy(), filename);
+        }
+    }
+    filename
 }
 
 /// Generate JS to open content in a new tab via synthetic file-input change event.
@@ -1143,7 +1169,7 @@ mod tests {
         std::fs::write(&path, "# Resolved").unwrap();
 
         let state = crate::watcher::WatcherState::new();
-        state.files.lock().unwrap().insert("resolve.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert(path.to_string_lossy().to_string(), path.clone());
 
         let result = resolve_and_read_tab(&state, "resolve.md");
         assert!(result.is_some());
@@ -1169,7 +1195,7 @@ mod tests {
         std::fs::write(&path, "content").unwrap();
 
         let state = crate::watcher::WatcherState::new();
-        state.files.lock().unwrap().insert("notes.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert(path.to_string_lossy().to_string(), path.clone());
 
         // "notes" should match "notes.md" via path_for_title fallback
         let result = resolve_and_read_tab(&state, "notes");
@@ -1185,7 +1211,7 @@ mod tests {
         let state = crate::watcher::WatcherState::new();
         // Path registered but file doesn't exist
         state.files.lock().unwrap().insert(
-            "gone.md".to_string(),
+            "/nonexistent_99999/gone.md".to_string(),
             std::path::PathBuf::from("/nonexistent_99999/gone.md"),
         );
 
@@ -1204,7 +1230,7 @@ mod tests {
         std::fs::write(&path, "old").unwrap();
 
         let state = crate::watcher::WatcherState::new();
-        state.files.lock().unwrap().insert("save.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert(path.to_string_lossy().to_string(), path.clone());
 
         let result = resolve_and_save_tab(&state, "save.md", "new content");
         assert!(result.is_ok());
@@ -1226,11 +1252,56 @@ mod tests {
     fn resolve_and_save_tab_invalid_path() {
         let state = crate::watcher::WatcherState::new();
         state.files.lock().unwrap().insert(
-            "bad.md".to_string(),
+            "/nonexistent_dir_99999/bad.md".to_string(),
             std::path::PathBuf::from("/nonexistent_dir_99999/bad.md"),
         );
 
         let err = resolve_and_save_tab(&state, "bad.md", "content").unwrap_err();
         assert!(err.starts_with("Save error:"));
+    }
+
+    // --- display_name_for_file tests ---
+
+    #[test]
+    fn display_name_no_conflict() {
+        let state = crate::watcher::WatcherState::new();
+        let path = Path::new("/tmp/a/notes.md");
+        assert_eq!(display_name_for_file(path, &state), "notes.md");
+    }
+
+    #[test]
+    fn display_name_with_conflict() {
+        let state = crate::watcher::WatcherState::new();
+        // Pre-register a file with the same filename in a different directory
+        state.files.lock().unwrap().insert(
+            "/tmp/a/notes.md".to_string(),
+            std::path::PathBuf::from("/tmp/a/notes.md"),
+        );
+        // New file has the same filename but different directory
+        let new_path = Path::new("/tmp/b/notes.md");
+        assert_eq!(display_name_for_file(new_path, &state), "b/notes.md");
+    }
+
+    #[test]
+    fn display_name_same_path_no_conflict() {
+        let state = crate::watcher::WatcherState::new();
+        let path = std::path::PathBuf::from("/tmp/a/notes.md");
+        state.files.lock().unwrap().insert(
+            "/tmp/a/notes.md".to_string(),
+            path.clone(),
+        );
+        // Same exact path should not trigger conflict
+        assert_eq!(display_name_for_file(&path, &state), "notes.md");
+    }
+
+    #[test]
+    fn display_name_different_filenames_no_conflict() {
+        let state = crate::watcher::WatcherState::new();
+        state.files.lock().unwrap().insert(
+            "/tmp/a/readme.md".to_string(),
+            std::path::PathBuf::from("/tmp/a/readme.md"),
+        );
+        let new_path = Path::new("/tmp/b/notes.md");
+        assert_eq!(display_name_for_file(new_path, &state), "notes.md");
     }
 }

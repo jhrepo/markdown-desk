@@ -9,7 +9,7 @@ const DEBOUNCE_MS: u64 = 300;
 
 pub struct WatcherState {
     pub handle: Mutex<Option<RecommendedWatcher>>,
-    /// filename → canonical path for all opened files
+    /// canonical path string → canonical PathBuf for all opened files
     pub files: Mutex<HashMap<String, PathBuf>>,
 }
 
@@ -29,12 +29,23 @@ impl WatcherState {
 }
 
 /// Look up the file path for a given tab title (filename or title without .md).
+/// Keys are canonical path strings; this searches by matching the filename component.
 pub fn path_for_title(state: &WatcherState, title: &str) -> Option<PathBuf> {
     let files = state.files.lock().ok()?;
-    files.get(title).cloned().or_else(|| {
-        let with_ext = format!("{}.md", title);
-        files.get(&with_ext).cloned()
-    })
+    // Search values by comparing filename extracted from canonical path
+    for canonical in files.values() {
+        let fname = crate::commands::filename_from_path(canonical);
+        if fname == title {
+            return Some(canonical.clone());
+        }
+        // Match without .md extension
+        if let Some(stem) = fname.strip_suffix(".md").or_else(|| fname.strip_suffix(".markdown")) {
+            if stem == title {
+                return Some(canonical.clone());
+            }
+        }
+    }
+    None
 }
 
 fn now_millis() -> u64 {
@@ -54,17 +65,17 @@ pub(crate) fn should_emit(now_ms: u64, last_ms: u64, debounce_ms: u64) -> bool {
     now_ms.saturating_sub(last_ms) >= debounce_ms
 }
 
-/// Canonicalize a path and extract the filename for the files map.
+/// Canonicalize a path and return (key, canonical) where key is the canonical path string.
 pub(crate) fn prepare_file_entry(path: &std::path::Path) -> Result<(String, PathBuf), String> {
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-    let filename = crate::commands::filename_from_path(path);
-    Ok((filename, canonical))
+    let key = canonical.to_string_lossy().to_string();
+    Ok((key, canonical))
 }
 
-/// Insert a file entry into the WatcherState files map.
-pub(crate) fn register_file(state: &WatcherState, filename: String, canonical: PathBuf) -> Result<(), String> {
+/// Insert a file entry into the WatcherState files map using canonical path as key.
+pub(crate) fn register_file(state: &WatcherState, key: String, canonical: PathBuf) -> Result<(), String> {
     state.files.lock().map_err(|e| format!("Lock error: {}", e))?
-        .insert(filename, canonical);
+        .insert(key, canonical);
     Ok(())
 }
 
@@ -74,9 +85,9 @@ pub fn add_file(
     state: &WatcherState,
     path: PathBuf,
 ) -> Result<(), String> {
-    let (filename, canonical) = prepare_file_entry(&path)?;
-    register_file(state, filename.clone(), canonical)?;
-    dbg_log!("Added file: {}", filename);
+    let (key, canonical) = prepare_file_entry(&path)?;
+    register_file(state, key, canonical)?;
+    dbg_log!("Added file: {}", path.display());
 
     rebuild_watcher(app, state)
 }
@@ -115,13 +126,14 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
                             .canonicalize()
                             .unwrap_or_else(|_| event_path.clone());
 
-                        for (fname, watched_path) in watched_files.iter() {
+                        for (_key, watched_path) in watched_files.iter() {
                             if canon == *watched_path {
                                 last_emit.store(now, Ordering::Relaxed);
+                                let fname = crate::commands::filename_from_path(watched_path);
                                 dbg_log!("File changed: {}", fname);
                                 if let Ok(content) = std::fs::read_to_string(event_path) {
                                     crate::commands::update_current_tab(
-                                        &app_handle, &content, fname,
+                                        &app_handle, &content, &fname,
                                     );
                                 }
                                 return;
@@ -190,7 +202,7 @@ mod tests {
     #[test]
     fn stop_watching_clears_files() {
         let state = WatcherState::new();
-        state.files.lock().unwrap().insert("test.md".to_string(), PathBuf::from("/tmp/test.md"));
+        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), PathBuf::from("/tmp/test.md"));
         stop_watching(&state);
         assert!(state.files.lock().unwrap().is_empty());
     }
@@ -198,7 +210,7 @@ mod tests {
     #[test]
     fn stop_watching_twice_is_safe() {
         let state = WatcherState::new();
-        state.files.lock().unwrap().insert("a.md".to_string(), PathBuf::from("/tmp/a.md"));
+        state.files.lock().unwrap().insert("/tmp/a.md".to_string(), PathBuf::from("/tmp/a.md"));
         stop_watching(&state);
         stop_watching(&state);
         assert!(state.files.lock().unwrap().is_empty());
@@ -210,7 +222,7 @@ mod tests {
     fn path_for_title_exact() {
         let state = WatcherState::new();
         let path = PathBuf::from("/tmp/test.md");
-        state.files.lock().unwrap().insert("test.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), path.clone());
         assert_eq!(path_for_title(&state, "test.md"), Some(path));
     }
 
@@ -218,7 +230,7 @@ mod tests {
     fn path_for_title_without_extension() {
         let state = WatcherState::new();
         let path = PathBuf::from("/tmp/test.md");
-        state.files.lock().unwrap().insert("test.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), path.clone());
         assert_eq!(path_for_title(&state, "test"), Some(path));
     }
 
@@ -233,8 +245,8 @@ mod tests {
         let state = WatcherState::new();
         let path_a = PathBuf::from("/tmp/a.md");
         let path_b = PathBuf::from("/tmp/b.md");
-        state.files.lock().unwrap().insert("a.md".to_string(), path_a.clone());
-        state.files.lock().unwrap().insert("b.md".to_string(), path_b.clone());
+        state.files.lock().unwrap().insert("/tmp/a.md".to_string(), path_a.clone());
+        state.files.lock().unwrap().insert("/tmp/b.md".to_string(), path_b.clone());
         assert_eq!(path_for_title(&state, "a.md"), Some(path_a));
         assert_eq!(path_for_title(&state, "b"), Some(path_b));
     }
@@ -242,14 +254,14 @@ mod tests {
     #[test]
     fn path_for_title_empty_string() {
         let state = WatcherState::new();
-        state.files.lock().unwrap().insert("test.md".to_string(), PathBuf::from("/tmp/test.md"));
+        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), PathBuf::from("/tmp/test.md"));
         assert_eq!(path_for_title(&state, ""), None);
     }
 
     #[test]
     fn path_for_title_case_sensitive() {
         let state = WatcherState::new();
-        state.files.lock().unwrap().insert("Test.md".to_string(), PathBuf::from("/tmp/Test.md"));
+        state.files.lock().unwrap().insert("/tmp/Test.md".to_string(), PathBuf::from("/tmp/Test.md"));
         // 대소문자 구분
         assert_eq!(path_for_title(&state, "test"), None);
         assert_eq!(path_for_title(&state, "Test"), Some(PathBuf::from("/tmp/Test.md")));
@@ -368,21 +380,21 @@ mod tests {
     }
 
     #[test]
-    fn path_for_title_prefers_exact_match() {
+    fn path_for_title_prefers_exact_filename() {
         let state = WatcherState::new();
         let path_exact = PathBuf::from("/tmp/README");
         let path_md = PathBuf::from("/tmp/README.md");
-        state.files.lock().unwrap().insert("README".to_string(), path_exact.clone());
-        state.files.lock().unwrap().insert("README.md".to_string(), path_md.clone());
-        // Exact match "README" should return /tmp/README, not /tmp/README.md
+        state.files.lock().unwrap().insert("/tmp/README".to_string(), path_exact.clone());
+        state.files.lock().unwrap().insert("/tmp/README.md".to_string(), path_md.clone());
+        // "README" matches filename "README" exactly
         assert_eq!(path_for_title(&state, "README"), Some(path_exact));
     }
 
     #[test]
-    fn path_for_title_fallback_adds_md() {
+    fn path_for_title_fallback_strips_md() {
         let state = WatcherState::new();
         let path = PathBuf::from("/tmp/notes.md");
-        state.files.lock().unwrap().insert("notes.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert("/tmp/notes.md".to_string(), path.clone());
         // "notes" should find "notes.md" via fallback
         assert_eq!(path_for_title(&state, "notes"), Some(path));
         // "notes.txt" should not match
@@ -393,15 +405,27 @@ mod tests {
     fn path_for_title_unicode_filename() {
         let state = WatcherState::new();
         let path = PathBuf::from("/tmp/메모.md");
-        state.files.lock().unwrap().insert("메모.md".to_string(), path.clone());
+        state.files.lock().unwrap().insert("/tmp/메모.md".to_string(), path.clone());
         assert_eq!(path_for_title(&state, "메모"), Some(path));
+    }
+
+    #[test]
+    fn path_for_title_same_filename_different_dirs() {
+        let state = WatcherState::new();
+        let path_a = PathBuf::from("/tmp/a/notes.md");
+        let path_b = PathBuf::from("/tmp/b/notes.md");
+        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path_a.clone());
+        state.files.lock().unwrap().insert("/tmp/b/notes.md".to_string(), path_b.clone());
+        // Both have filename "notes.md"; path_for_title returns one of them (non-deterministic)
+        let result = path_for_title(&state, "notes.md");
+        assert!(result == Some(path_a) || result == Some(path_b));
     }
 
     #[test]
     fn stop_watching_after_adding_files() {
         let state = WatcherState::new();
-        state.files.lock().unwrap().insert("a.md".to_string(), PathBuf::from("/tmp/a.md"));
-        state.files.lock().unwrap().insert("b.md".to_string(), PathBuf::from("/tmp/b.md"));
+        state.files.lock().unwrap().insert("/tmp/a.md".to_string(), PathBuf::from("/tmp/a.md"));
+        state.files.lock().unwrap().insert("/tmp/b.md".to_string(), PathBuf::from("/tmp/b.md"));
         assert_eq!(state.files.lock().unwrap().len(), 2);
         stop_watching(&state);
         assert!(state.files.lock().unwrap().is_empty());
@@ -429,8 +453,10 @@ mod tests {
         let path = dir.join("entry.md");
         std::fs::write(&path, "test").unwrap();
 
-        let (filename, canonical) = prepare_file_entry(&path).unwrap();
-        assert_eq!(filename, "entry.md");
+        let (key, canonical) = prepare_file_entry(&path).unwrap();
+        // Key is now canonical path string, not filename
+        assert!(key.ends_with("entry.md"));
+        assert!(key.starts_with("/"));
         assert!(canonical.is_absolute());
         // canonical should resolve to the same file
         assert_eq!(std::fs::read_to_string(&canonical).unwrap(), "test");
@@ -454,8 +480,9 @@ mod tests {
         std::fs::write(&real, "content").unwrap();
         // skip if symlink creation fails (permissions)
         if std::os::unix::fs::symlink(&real, &link).is_ok() {
-            let (filename, canonical) = prepare_file_entry(&link).unwrap();
-            assert_eq!(filename, "link.md");
+            let (key, canonical) = prepare_file_entry(&link).unwrap();
+            // Key is canonical path (resolves through symlink to real.md)
+            assert!(key.ends_with("real.md"));
             // canonical should resolve through the symlink
             assert_eq!(canonical, real.canonicalize().unwrap());
             let _ = std::fs::remove_file(&link);
