@@ -11,6 +11,20 @@ use tauri::Manager;
 /// Queue for files opened via file association before the window is ready.
 struct PendingFiles(Mutex<Vec<std::path::PathBuf>>);
 
+/// Drain all pending files from the queue.
+fn drain_pending(pending: &PendingFiles) -> Vec<std::path::PathBuf> {
+    pending.0.lock().map(|mut g| g.drain(..).collect()).unwrap_or_else(|e| {
+        dbg_log!("[file-assoc] Failed to lock pending files: {}", e);
+        Vec::new()
+    })
+}
+
+/// Push a file path into the pending queue.
+fn push_pending(pending: &PendingFiles, path: std::path::PathBuf) -> Result<(), String> {
+    pending.0.lock().map_err(|e| format!("Lock error: {}", e))?.push(path);
+    Ok(())
+}
+
 pub fn run() {
     logger::init();
     dbg_log!("App starting...");
@@ -49,12 +63,7 @@ pub fn run() {
                 // Wait for the webview to be ready
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let pending = app_handle.state::<PendingFiles>();
-                let Ok(mut guard) = pending.0.lock() else {
-                    dbg_log!("[file-assoc] Failed to lock pending files");
-                    return;
-                };
-                let files: Vec<_> = guard.drain(..).collect();
-                drop(guard);
+                let files = drain_pending(&pending);
                 for path in files {
                     dbg_log!("[file-assoc] Processing queued file: {}", path.display());
                     commands::open_file_directly(&app_handle, path);
@@ -78,10 +87,9 @@ pub fn run() {
                         commands::open_file_directly(app_handle, path);
                     } else {
                         let pending = app_handle.state::<PendingFiles>();
-                        match pending.0.lock() {
-                            Ok(mut guard) => guard.push(path),
-                            Err(e) => dbg_log!("[file-assoc] Lock error: {}", e),
-                        };
+                        if let Err(e) = push_pending(&pending, path) {
+                            dbg_log!("[file-assoc] {}", e);
+                        }
                     }
                 }
             }
@@ -286,4 +294,48 @@ mod tests {
         // URL path encoding: + stays as +, not space
         assert_eq!(percent_decode("/a+b"), "/a+b");
     }
+
+    // --- PendingFiles / drain_pending / push_pending tests ---
+
+    #[test]
+    fn drain_pending_empty() {
+        let pf = PendingFiles(Mutex::new(Vec::new()));
+        let files = drain_pending(&pf);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn push_and_drain_pending() {
+        let pf = PendingFiles(Mutex::new(Vec::new()));
+        push_pending(&pf, std::path::PathBuf::from("/tmp/a.md")).unwrap();
+        push_pending(&pf, std::path::PathBuf::from("/tmp/b.md")).unwrap();
+
+        let files = drain_pending(&pf);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], std::path::PathBuf::from("/tmp/a.md"));
+        assert_eq!(files[1], std::path::PathBuf::from("/tmp/b.md"));
+    }
+
+    #[test]
+    fn drain_pending_clears_queue() {
+        let pf = PendingFiles(Mutex::new(Vec::new()));
+        push_pending(&pf, std::path::PathBuf::from("/tmp/x.md")).unwrap();
+
+        let first = drain_pending(&pf);
+        assert_eq!(first.len(), 1);
+
+        let second = drain_pending(&pf);
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn push_pending_multiple_then_drain() {
+        let pf = PendingFiles(Mutex::new(Vec::new()));
+        for i in 0..10 {
+            push_pending(&pf, std::path::PathBuf::from(format!("/tmp/{}.md", i))).unwrap();
+        }
+        let files = drain_pending(&pf);
+        assert_eq!(files.len(), 10);
+    }
 }
+

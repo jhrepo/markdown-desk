@@ -9,10 +9,16 @@ fn cache_dir() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
 }
 
+/// Build the full path to the debug log file.
+pub(crate) fn log_file_path() -> std::path::PathBuf {
+    cache_dir().join("markdown-desk").join("debug.log")
+}
+
 pub fn init() {
-    let log_dir = cache_dir().join("markdown-desk");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let path = log_dir.join("debug.log");
+    let path = log_file_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     if let Ok(f) = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -130,5 +136,46 @@ mod tests {
         let secs: u64 = ts.split('.').next().unwrap().parse().unwrap();
         // Should be after 2024-01-01 (1704067200)
         assert!(secs > 1_704_067_200);
+    }
+
+    // --- init / log integration tests ---
+    // Note: these share global LOG_FILE state, so they test init+log together.
+
+    #[test]
+    fn init_and_log_integration() {
+        // init creates the log file
+        init();
+        let path = log_file_path();
+        assert!(path.exists());
+
+        // log writes to the file
+        log("coverage_marker_78901");
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(content.contains("coverage_marker_78901"));
+
+        // init can be called again without panic (re-truncates)
+        init();
+        assert!(path.exists());
+    }
+
+    // --- log_file_path tests ---
+
+    #[test]
+    fn log_file_path_ends_with_debug_log() {
+        let path = log_file_path();
+        assert!(path.to_string_lossy().ends_with("markdown-desk/debug.log"));
+    }
+
+    #[test]
+    fn log_file_path_is_absolute() {
+        let path = log_file_path();
+        assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn log_file_path_parent_is_markdown_desk() {
+        let path = log_file_path();
+        let parent = path.parent().unwrap();
+        assert_eq!(parent.file_name().unwrap().to_str().unwrap(), "markdown-desk");
     }
 }

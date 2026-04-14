@@ -10,45 +10,41 @@ pub fn native_open_file(app: tauri::AppHandle) {
     open_file_and_watch(&app);
 }
 
-/// Open a file via native dialog, inject as new tab via file-input change event, start watching.
+/// Open file(s) via native dialog, inject as new tabs via file-input change event, start watching.
 pub fn open_file_and_watch(app: &tauri::AppHandle) {
     let app_handle = app.clone();
 
     app.dialog()
         .file()
         .add_filter("Markdown", &["md", "markdown", "txt"])
-        .pick_file(move |file_path| {
-            let Some(fp) = file_path else { return };
-            let path = match fp.into_path() {
-                Ok(pb) => pb,
-                Err(e) => {
-                    dbg_log!("[open] FilePath error: {}", e);
-                    return;
+        .pick_files(move |file_paths| {
+            let Some(fps) = file_paths else { return };
+
+            for fp in fps {
+                let path = match fp.into_path() {
+                    Ok(pb) => pb,
+                    Err(e) => {
+                        dbg_log!("[open] FilePath error: {}", e);
+                        continue;
+                    }
+                };
+
+                match read_and_prepare_file(&path) {
+                    Ok((content, filename)) => {
+                        dbg_log!("[open] {} bytes from {}", content.len(), filename);
+                        open_in_new_tab(&app_handle, &content, &filename);
+
+                        let state = app_handle.state::<WatcherState>();
+                        match crate::watcher::add_file(&app_handle, &state, path.clone()) {
+                            Ok(_) => {
+                                dbg_log!("[open] File added to watch list");
+                                persist_watched_path(&app_handle, &path);
+                            }
+                            Err(e) => dbg_log!("[open] Watcher error: {}", e),
+                        }
+                    }
+                    Err(e) => dbg_log!("[open] {}", e),
                 }
-            };
-
-            dbg_log!("[open] File: {}", path.display());
-
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    dbg_log!("[open] Read error: {}", e);
-                    return;
-                }
-            };
-
-            let filename = filename_from_path(&path);
-            dbg_log!("[open] {} bytes from {}", content.len(), filename);
-
-            open_in_new_tab(&app_handle, &content, &filename);
-
-            let state = app_handle.state::<WatcherState>();
-            match crate::watcher::add_file(&app_handle, &state, path.clone()) {
-                Ok(_) => {
-                    dbg_log!("[open] File added to watch list");
-                    persist_watched_path(&app_handle, &path);
-                }
-                Err(e) => dbg_log!("[open] Watcher error: {}", e),
             }
         });
 }
@@ -57,25 +53,37 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
 pub fn open_file_directly(app: &tauri::AppHandle, path: std::path::PathBuf) {
     dbg_log!("[file-assoc] Opening: {}", path.display());
 
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            dbg_log!("[file-assoc] Read error: {}", e);
-            return;
-        }
-    };
+    match read_and_prepare_file(&path) {
+        Ok((content, filename)) => {
+            open_in_new_tab(app, &content, &filename);
 
-    let filename = filename_from_path(&path);
-    open_in_new_tab(app, &content, &filename);
-
-    let state = app.state::<WatcherState>();
-    match crate::watcher::add_file(app, &state, path.clone()) {
-        Ok(_) => {
-            dbg_log!("[file-assoc] File added to watch list");
-            persist_watched_path(app, &path);
+            let state = app.state::<WatcherState>();
+            match crate::watcher::add_file(app, &state, path.clone()) {
+                Ok(_) => {
+                    dbg_log!("[file-assoc] File added to watch list");
+                    persist_watched_path(app, &path);
+                }
+                Err(e) => dbg_log!("[file-assoc] Watcher error: {}", e),
+            }
         }
-        Err(e) => dbg_log!("[file-assoc] Watcher error: {}", e),
+        Err(e) => dbg_log!("[file-assoc] {}", e),
     }
+}
+
+/// Read a file and return its (content, filename) pair.
+pub(crate) fn read_and_prepare_file(path: &std::path::Path) -> Result<(String, String), String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Read error: {}", e))?;
+    let filename = filename_from_path(path);
+    Ok((content, filename))
+}
+
+/// Read multiple files and return a vec of results, one per path (order preserved).
+#[cfg(test)]
+pub(crate) fn read_and_prepare_files(
+    paths: &[std::path::PathBuf],
+) -> Vec<Result<(String, String), String>> {
+    paths.iter().map(|p| read_and_prepare_file(p)).collect()
 }
 
 /// Extract the filename from a path as a String.
@@ -184,14 +192,19 @@ fn persist_watched_path(app: &tauri::AppHandle, path: &std::path::Path) {
     }
 }
 
+/// Validate a path string for watcher restoration. Returns Some(PathBuf) if the file exists.
+pub(crate) fn validate_restore_path(path: &str) -> Option<std::path::PathBuf> {
+    let path_buf = std::path::PathBuf::from(path);
+    if path_buf.exists() { Some(path_buf) } else { None }
+}
+
 /// Tauri IPC command — called from bridge.js on app restart to restore file watching.
 #[tauri::command]
 pub fn restore_watcher(app: tauri::AppHandle, path: String) {
-    let path_buf = std::path::PathBuf::from(&path);
-    if !path_buf.exists() {
+    let Some(path_buf) = validate_restore_path(&path) else {
         dbg_log!("[restore] File no longer exists: {}", path);
         return;
-    }
+    };
     let state = app.state::<WatcherState>();
     match crate::watcher::add_file(&app, &state, path_buf) {
         Ok(_) => dbg_log!("[restore] Watcher restored for: {}", path),
@@ -199,35 +212,54 @@ pub fn restore_watcher(app: tauri::AppHandle, path: String) {
     }
 }
 
+/// Resolve a tab title to its file content. Returns (content, filename) on success.
+pub(crate) fn resolve_and_read_tab(
+    state: &WatcherState,
+    title: &str,
+) -> Option<Result<(String, String), String>> {
+    let path = crate::watcher::path_for_title(state, title)?;
+    Some(read_and_prepare_file(&path))
+}
+
 /// Tauri IPC command — called from bridge.js on tab switch.
 /// Reads the file matching the given tab title and updates the tab.
 #[tauri::command]
 pub fn refresh_active_tab(app: tauri::AppHandle, title: String) {
     let state = app.state::<WatcherState>();
-    let Some(path) = crate::watcher::path_for_title(&state, &title) else {
-        return;
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            let filename = filename_from_path(&path);
+    match resolve_and_read_tab(&state, &title) {
+        Some(Ok((content, filename))) => {
             update_current_tab(&app, &content, &filename);
             dbg_log!("[refresh] Tab refreshed: {}", filename);
         }
-        Err(e) => dbg_log!("[refresh] Read error: {}", e),
+        Some(Err(e)) => dbg_log!("[refresh] {}", e),
+        None => {}
     }
+}
+
+/// Save content to a file path. Returns Ok(()) on success.
+pub(crate) fn save_content_to_file(path: &std::path::Path, content: &str) -> Result<(), String> {
+    std::fs::write(path, content).map_err(|e| format!("Save error: {}", e))
+}
+
+/// Resolve a tab title and save content to the corresponding file.
+pub(crate) fn resolve_and_save_tab(
+    state: &WatcherState,
+    title: &str,
+    content: &str,
+) -> Result<std::path::PathBuf, String> {
+    let path = crate::watcher::path_for_title(state, title)
+        .ok_or_else(|| format!("No watched file for tab: {}", title))?;
+    save_content_to_file(&path, content)?;
+    Ok(path)
 }
 
 /// Tauri IPC command — save editor content to the file matching the active tab.
 #[tauri::command]
 pub fn save_file(app: tauri::AppHandle, title: String, content: String) {
     let state = app.state::<WatcherState>();
-    let Some(path) = crate::watcher::path_for_title(&state, &title) else {
-        dbg_log!("[save] No watched file for tab: {}", title);
-        return;
-    };
-    match std::fs::write(&path, &content) {
-        Ok(_) => dbg_log!("[save] Saved: {}", path.display()),
-        Err(e) => dbg_log!("[save] Write error: {}", e),
+    match resolve_and_save_tab(&state, &title, &content) {
+        Ok(path) => dbg_log!("[save] Saved: {}", path.display()),
+        Err(e) => dbg_log!("[save] {}", e),
     }
 }
 
@@ -934,5 +966,271 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), data);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // --- read_and_prepare_file / read_and_prepare_files tests ---
+
+    #[test]
+    fn read_and_prepare_file_returns_content_and_filename() {
+        let dir = std::env::temp_dir().join("md_desk_test_read_prepare");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.md");
+        std::fs::write(&path, "# Hello").unwrap();
+
+        let (content, filename) = read_and_prepare_file(&path).unwrap();
+        assert_eq!(content, "# Hello");
+        assert_eq!(filename, "test.md");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn read_and_prepare_file_nonexistent_returns_error() {
+        let path = Path::new("/nonexistent_path_99999/missing.md");
+        assert!(read_and_prepare_file(path).is_err());
+    }
+
+    #[test]
+    fn read_and_prepare_files_multiple() {
+        let dir = std::env::temp_dir().join("md_desk_test_read_multi");
+        let _ = std::fs::create_dir_all(&dir);
+        let p1 = dir.join("a.md");
+        let p2 = dir.join("b.md");
+        let p3 = dir.join("c.md");
+        std::fs::write(&p1, "AAA").unwrap();
+        std::fs::write(&p2, "BBB").unwrap();
+        std::fs::write(&p3, "CCC").unwrap();
+
+        let paths = vec![p1.clone(), p2.clone(), p3.clone()];
+        let results = read_and_prepare_files(&paths);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap().0, "AAA");
+        assert_eq!(results[0].as_ref().unwrap().1, "a.md");
+        assert_eq!(results[1].as_ref().unwrap().0, "BBB");
+        assert_eq!(results[2].as_ref().unwrap().0, "CCC");
+
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+        let _ = std::fs::remove_file(&p3);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn read_and_prepare_files_skips_unreadable() {
+        let dir = std::env::temp_dir().join("md_desk_test_read_skip");
+        let _ = std::fs::create_dir_all(&dir);
+        let good = dir.join("good.md");
+        let bad = Path::new("/nonexistent_99999/bad.md").to_path_buf();
+        std::fs::write(&good, "OK").unwrap();
+
+        let paths = vec![good.clone(), bad];
+        let results = read_and_prepare_files(&paths);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+
+        let _ = std::fs::remove_file(&good);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn read_and_prepare_files_empty_list() {
+        let paths: Vec<std::path::PathBuf> = vec![];
+        let results = read_and_prepare_files(&paths);
+        assert!(results.is_empty());
+    }
+
+    // --- validate_restore_path tests ---
+
+    #[test]
+    fn validate_restore_path_existing_file() {
+        let dir = std::env::temp_dir().join("md_desk_test_restore");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("exists.md");
+        std::fs::write(&path, "test").unwrap();
+
+        let result = validate_restore_path(path.to_str().unwrap());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), path);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn validate_restore_path_nonexistent() {
+        let result = validate_restore_path("/nonexistent_path_99999/file.md");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn validate_restore_path_empty_string() {
+        let result = validate_restore_path("");
+        // Empty string path does not exist
+        assert!(result.is_none());
+    }
+
+    // --- save_content_to_file tests ---
+
+    #[test]
+    fn save_content_to_file_success() {
+        let dir = std::env::temp_dir().join("md_desk_test_save");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("save_test.md");
+
+        assert!(save_content_to_file(&path, "# Saved").is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Saved");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn save_content_to_file_overwrite() {
+        let dir = std::env::temp_dir().join("md_desk_test_save_ow");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("overwrite.md");
+        std::fs::write(&path, "old content").unwrap();
+
+        assert!(save_content_to_file(&path, "new content").is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn save_content_to_file_invalid_path() {
+        let path = Path::new("/nonexistent_dir_99999/file.md");
+        let err = save_content_to_file(path, "test").unwrap_err();
+        assert!(err.starts_with("Save error:"));
+    }
+
+    #[test]
+    fn save_content_to_file_empty_content() {
+        let dir = std::env::temp_dir().join("md_desk_test_save_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.md");
+
+        assert!(save_content_to_file(&path, "").is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn save_content_to_file_unicode() {
+        let dir = std::env::temp_dir().join("md_desk_test_save_uni");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("한글.md");
+
+        assert!(save_content_to_file(&path, "# 한글 제목\n본문 내용").is_ok());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("한글 제목"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    // --- resolve_and_read_tab tests ---
+
+    #[test]
+    fn resolve_and_read_tab_found() {
+        let dir = std::env::temp_dir().join("md_desk_test_resolve_read");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("resolve.md");
+        std::fs::write(&path, "# Resolved").unwrap();
+
+        let state = crate::watcher::WatcherState::new();
+        state.files.lock().unwrap().insert("resolve.md".to_string(), path.clone());
+
+        let result = resolve_and_read_tab(&state, "resolve.md");
+        assert!(result.is_some());
+        let (content, filename) = result.unwrap().unwrap();
+        assert_eq!(content, "# Resolved");
+        assert_eq!(filename, "resolve.md");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn resolve_and_read_tab_not_found() {
+        let state = crate::watcher::WatcherState::new();
+        assert!(resolve_and_read_tab(&state, "missing").is_none());
+    }
+
+    #[test]
+    fn resolve_and_read_tab_title_without_ext() {
+        let dir = std::env::temp_dir().join("md_desk_test_resolve_noext");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("notes.md");
+        std::fs::write(&path, "content").unwrap();
+
+        let state = crate::watcher::WatcherState::new();
+        state.files.lock().unwrap().insert("notes.md".to_string(), path.clone());
+
+        // "notes" should match "notes.md" via path_for_title fallback
+        let result = resolve_and_read_tab(&state, "notes");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().unwrap().0, "content");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn resolve_and_read_tab_file_deleted() {
+        let state = crate::watcher::WatcherState::new();
+        // Path registered but file doesn't exist
+        state.files.lock().unwrap().insert(
+            "gone.md".to_string(),
+            std::path::PathBuf::from("/nonexistent_99999/gone.md"),
+        );
+
+        let result = resolve_and_read_tab(&state, "gone.md");
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    // --- resolve_and_save_tab tests ---
+
+    #[test]
+    fn resolve_and_save_tab_success() {
+        let dir = std::env::temp_dir().join("md_desk_test_resolve_save");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("save.md");
+        std::fs::write(&path, "old").unwrap();
+
+        let state = crate::watcher::WatcherState::new();
+        state.files.lock().unwrap().insert("save.md".to_string(), path.clone());
+
+        let result = resolve_and_save_tab(&state, "save.md", "new content");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn resolve_and_save_tab_no_matching_file() {
+        let state = crate::watcher::WatcherState::new();
+        let err = resolve_and_save_tab(&state, "missing", "content").unwrap_err();
+        assert!(err.contains("No watched file"));
+    }
+
+    #[test]
+    fn resolve_and_save_tab_invalid_path() {
+        let state = crate::watcher::WatcherState::new();
+        state.files.lock().unwrap().insert(
+            "bad.md".to_string(),
+            std::path::PathBuf::from("/nonexistent_dir_99999/bad.md"),
+        );
+
+        let err = resolve_and_save_tab(&state, "bad.md", "content").unwrap_err();
+        assert!(err.starts_with("Save error:"));
     }
 }

@@ -56,22 +56,45 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
         .build()
 }
 
+/// Determine the action for a given menu event ID.
+pub(crate) enum MenuAction {
+    Open,
+    Save,
+    CheckUpdate,
+    Unknown,
+}
+
+/// Map a menu event ID string to a MenuAction.
+pub(crate) fn resolve_menu_action(id: &str) -> MenuAction {
+    match id {
+        "open" => MenuAction::Open,
+        "save" => MenuAction::Save,
+        "check_update" => MenuAction::CheckUpdate,
+        _ => MenuAction::Unknown,
+    }
+}
+
 pub fn setup_menu_events(app: &tauri::AppHandle) {
     let app_handle = app.clone();
     app.on_menu_event(move |_app, event| {
-        if event.id() == "open" {
-            dbg_log!("[menu] Open clicked");
-            crate::commands::open_file_and_watch(&app_handle);
-        } else if event.id() == "save" {
-            dbg_log!("[menu] Save clicked");
-            if let Some(ww) = app_handle.get_webview_window("main") {
-                let _ = ww.eval(JS_SAVE_FILE);
+        match resolve_menu_action(event.id().as_ref()) {
+            MenuAction::Open => {
+                dbg_log!("[menu] Open clicked");
+                crate::commands::open_file_and_watch(&app_handle);
             }
-        } else if event.id() == "check_update" {
-            dbg_log!("[menu] Check for Updates clicked");
-            if let Some(ww) = app_handle.get_webview_window("main") {
-                let _ = ww.eval(JS_CHECK_UPDATE);
+            MenuAction::Save => {
+                dbg_log!("[menu] Save clicked");
+                if let Some(ww) = app_handle.get_webview_window("main") {
+                    let _ = ww.eval(JS_SAVE_FILE);
+                }
             }
+            MenuAction::CheckUpdate => {
+                dbg_log!("[menu] Check for Updates clicked");
+                if let Some(ww) = app_handle.get_webview_window("main") {
+                    let _ = ww.eval(JS_CHECK_UPDATE);
+                }
+            }
+            MenuAction::Unknown => {}
         }
     });
 }
@@ -132,5 +155,39 @@ mod tests {
         // This ensures the function name matches what bridge.js exposes
         assert!(JS_CHECK_UPDATE.contains("checkForUpdates"));
         assert!(!JS_CHECK_UPDATE.contains("doCheckForUpdates"));
+    }
+
+    // --- resolve_menu_action tests ---
+
+    #[test]
+    fn resolve_menu_action_open() {
+        assert!(matches!(resolve_menu_action("open"), MenuAction::Open));
+    }
+
+    #[test]
+    fn resolve_menu_action_save() {
+        assert!(matches!(resolve_menu_action("save"), MenuAction::Save));
+    }
+
+    #[test]
+    fn resolve_menu_action_check_update() {
+        assert!(matches!(resolve_menu_action("check_update"), MenuAction::CheckUpdate));
+    }
+
+    #[test]
+    fn resolve_menu_action_unknown_id() {
+        assert!(matches!(resolve_menu_action("unknown"), MenuAction::Unknown));
+    }
+
+    #[test]
+    fn resolve_menu_action_empty_string() {
+        assert!(matches!(resolve_menu_action(""), MenuAction::Unknown));
+    }
+
+    #[test]
+    fn resolve_menu_action_case_sensitive() {
+        // "Open" (capitalized) should not match "open"
+        assert!(matches!(resolve_menu_action("Open"), MenuAction::Unknown));
+        assert!(matches!(resolve_menu_action("SAVE"), MenuAction::Unknown));
     }
 }

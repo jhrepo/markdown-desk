@@ -90,4 +90,25 @@ mod tests {
     fn is_default_handler_false_for_invalid_bundle() {
         assert!(!is_default_md_handler("com.nonexistent.app.12345"));
     }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn is_default_handler_empty_bundle_id() {
+        assert!(!is_default_md_handler(""));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn set_default_handler_with_valid_bundle() {
+        // This actually sets the handler; use our real bundle ID to keep system state sane
+        let result = set_as_default_md_handler("com.markdowndesk.app");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn set_then_check_default_handler() {
+        let _ = set_as_default_md_handler("com.markdowndesk.app");
+        assert!(is_default_md_handler("com.markdowndesk.app"));
+    }
 }

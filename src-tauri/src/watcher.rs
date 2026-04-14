@@ -54,17 +54,28 @@ pub(crate) fn should_emit(now_ms: u64, last_ms: u64, debounce_ms: u64) -> bool {
     now_ms.saturating_sub(last_ms) >= debounce_ms
 }
 
+/// Canonicalize a path and extract the filename for the files map.
+pub(crate) fn prepare_file_entry(path: &std::path::Path) -> Result<(String, PathBuf), String> {
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let filename = crate::commands::filename_from_path(path);
+    Ok((filename, canonical))
+}
+
+/// Insert a file entry into the WatcherState files map.
+pub(crate) fn register_file(state: &WatcherState, filename: String, canonical: PathBuf) -> Result<(), String> {
+    state.files.lock().map_err(|e| format!("Lock error: {}", e))?
+        .insert(filename, canonical);
+    Ok(())
+}
+
 /// Add a file and rebuild the watcher to cover all files.
 pub fn add_file(
     app: &tauri::AppHandle,
     state: &WatcherState,
     path: PathBuf,
 ) -> Result<(), String> {
-    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-    let filename = crate::commands::filename_from_path(&path);
-
-    state.files.lock().map_err(|e| format!("Lock error: {}", e))?
-        .insert(filename.clone(), canonical);
+    let (filename, canonical) = prepare_file_entry(&path)?;
+    register_file(state, filename.clone(), canonical)?;
     dbg_log!("Added file: {}", filename);
 
     rebuild_watcher(app, state)
@@ -407,5 +418,78 @@ mod tests {
         let now2 = now_millis();
         let last2 = last_emit.load(Ordering::Relaxed);
         assert!(!should_emit(now2, last2, DEBOUNCE_MS));
+    }
+
+    // --- prepare_file_entry tests ---
+
+    #[test]
+    fn prepare_file_entry_existing_file() {
+        let dir = std::env::temp_dir().join("md_desk_test_prepare");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("entry.md");
+        std::fs::write(&path, "test").unwrap();
+
+        let (filename, canonical) = prepare_file_entry(&path).unwrap();
+        assert_eq!(filename, "entry.md");
+        assert!(canonical.is_absolute());
+        // canonical should resolve to the same file
+        assert_eq!(std::fs::read_to_string(&canonical).unwrap(), "test");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn prepare_file_entry_nonexistent() {
+        let path = PathBuf::from("/nonexistent_99999/missing.md");
+        assert!(prepare_file_entry(&path).is_err());
+    }
+
+    #[test]
+    fn prepare_file_entry_symlink() {
+        let dir = std::env::temp_dir().join("md_desk_test_prepare_sym");
+        let _ = std::fs::create_dir_all(&dir);
+        let real = dir.join("real.md");
+        let link = dir.join("link.md");
+        std::fs::write(&real, "content").unwrap();
+        // skip if symlink creation fails (permissions)
+        if std::os::unix::fs::symlink(&real, &link).is_ok() {
+            let (filename, canonical) = prepare_file_entry(&link).unwrap();
+            assert_eq!(filename, "link.md");
+            // canonical should resolve through the symlink
+            assert_eq!(canonical, real.canonicalize().unwrap());
+            let _ = std::fs::remove_file(&link);
+        }
+        let _ = std::fs::remove_file(&real);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    // --- register_file tests ---
+
+    #[test]
+    fn register_file_adds_to_map() {
+        let state = WatcherState::new();
+        let canonical = PathBuf::from("/tmp/test.md");
+        assert!(register_file(&state, "test.md".to_string(), canonical.clone()).is_ok());
+        assert_eq!(state.files.lock().unwrap().get("test.md"), Some(&canonical));
+    }
+
+    #[test]
+    fn register_file_overwrites_existing() {
+        let state = WatcherState::new();
+        let path1 = PathBuf::from("/tmp/old.md");
+        let path2 = PathBuf::from("/tmp/new.md");
+        register_file(&state, "test.md".to_string(), path1).unwrap();
+        register_file(&state, "test.md".to_string(), path2.clone()).unwrap();
+        assert_eq!(state.files.lock().unwrap().get("test.md"), Some(&path2));
+    }
+
+    #[test]
+    fn register_file_multiple_entries() {
+        let state = WatcherState::new();
+        register_file(&state, "a.md".to_string(), PathBuf::from("/tmp/a.md")).unwrap();
+        register_file(&state, "b.md".to_string(), PathBuf::from("/tmp/b.md")).unwrap();
+        register_file(&state, "c.md".to_string(), PathBuf::from("/tmp/c.md")).unwrap();
+        assert_eq!(state.files.lock().unwrap().len(), 3);
     }
 }
