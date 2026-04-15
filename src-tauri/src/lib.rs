@@ -7,6 +7,14 @@ mod watcher;
 
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_window_state::StateFlags;
+
+/// Return the window state flags to persist across sessions.
+/// Saves position, size, maximized, and fullscreen state.
+/// Excludes VISIBLE (always show) and DECORATIONS (always default).
+fn window_state_flags() -> StateFlags {
+    StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED | StateFlags::FULLSCREEN
+}
 
 /// Queue for files opened via file association before the window is ready.
 struct PendingFiles(Mutex<Vec<std::path::PathBuf>>);
@@ -32,7 +40,10 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_window_state::Builder::new()
+            .with_state_flags(window_state_flags())
+            .build());
 
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_webdriver::init());
@@ -336,6 +347,20 @@ mod tests {
         }
         let files = drain_pending(&pf);
         assert_eq!(files.len(), 10);
+    }
+
+    // --- window state tests ---
+
+    #[test]
+    fn window_state_flags_correct() {
+        use tauri_plugin_window_state::StateFlags;
+        let flags = window_state_flags();
+        // Saves position, size, maximized, fullscreen
+        assert!(flags.contains(StateFlags::POSITION | StateFlags::SIZE
+            | StateFlags::MAXIMIZED | StateFlags::FULLSCREEN));
+        // Does not save visible or decorations
+        assert!(!flags.contains(StateFlags::VISIBLE));
+        assert!(!flags.contains(StateFlags::DECORATIONS));
     }
 }
 

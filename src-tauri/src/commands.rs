@@ -20,6 +20,9 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
         .pick_files(move |file_paths| {
             let Some(fps) = file_paths else { return };
 
+            // Phase 1: read all files and register them in the watcher state
+            let mut prepared: Vec<(std::path::PathBuf, String)> = Vec::new();
+            let state = app_handle.state::<WatcherState>();
             for fp in fps {
                 let path = match fp.into_path() {
                     Ok(pb) => pb,
@@ -31,11 +34,6 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
 
                 match read_and_prepare_file(&path) {
                     Ok((content, _filename)) => {
-                        let state = app_handle.state::<WatcherState>();
-                        let display = display_name_for_file(&path, &state);
-                        dbg_log!("[open] {} bytes from {}", content.len(), display);
-                        open_in_new_tab(&app_handle, &content, &display);
-
                         match crate::watcher::add_file(&app_handle, &state, path.clone()) {
                             Ok(_) => {
                                 dbg_log!("[open] File added to watch list");
@@ -43,9 +41,17 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
                             }
                             Err(e) => dbg_log!("[open] Watcher error: {}", e),
                         }
+                        prepared.push((path, content));
                     }
                     Err(e) => dbg_log!("[open] {}", e),
                 }
+            }
+
+            // Phase 2: compute display names (all files now in state) and open tabs
+            for (path, content) in prepared {
+                let display = display_name_for_file(&path, &state);
+                dbg_log!("[open] {} bytes from {}", content.len(), display);
+                open_in_new_tab(&app_handle, &content, &display);
             }
         });
 }
@@ -107,9 +113,10 @@ pub(crate) fn display_name_for_file(
         Ok(f) => f,
         Err(_) => return filename,
     };
-    // Check if any existing entry has the same filename but different path
+    // Compare using canonical path to avoid false conflicts from non-canonical input
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let has_conflict = files.values().any(|existing| {
-        filename_from_path(existing) == filename && existing != path
+        filename_from_path(existing) == filename && *existing != canon
     });
     if has_conflict {
         // Prefix with parent directory name: "dir/filename.md"
@@ -1292,6 +1299,23 @@ mod tests {
         );
         // Same exact path should not trigger conflict
         assert_eq!(display_name_for_file(&path, &state), "notes.md");
+    }
+
+    #[test]
+    fn display_name_batch_open_both_files_get_prefix() {
+        // Simulates batch open: both files registered BEFORE computing display names
+        let state = crate::watcher::WatcherState::new();
+        state.files.lock().unwrap().insert(
+            "/tmp/a/notes.md".to_string(),
+            std::path::PathBuf::from("/tmp/a/notes.md"),
+        );
+        state.files.lock().unwrap().insert(
+            "/tmp/b/notes.md".to_string(),
+            std::path::PathBuf::from("/tmp/b/notes.md"),
+        );
+        // Both should have directory prefix since they conflict
+        assert_eq!(display_name_for_file(Path::new("/tmp/a/notes.md"), &state), "a/notes.md");
+        assert_eq!(display_name_for_file(Path::new("/tmp/b/notes.md"), &state), "b/notes.md");
     }
 
     #[test]

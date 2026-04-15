@@ -68,6 +68,29 @@ describe('탭 관리', () => {
     expect(titles).toContain('multi-c');
   });
 
+  it('동일 파일명으로 탭을 열면 각각 별도 탭이 생성된다', async () => {
+    const tabsBefore = await $$('#tab-list .tab-item');
+    const countBefore = tabsBefore.length;
+
+    // Open two files with the same name (simulating files from different directories)
+    for (let i = 0; i < 2; i++) {
+      await browser.execute((content, idx) => {
+        const fileInput = document.getElementById('file-input');
+        if (!fileInput) return;
+        const blob = new Blob([content], { type: 'text/markdown' });
+        const file = new File([blob], 'notes.md', { type: 'text/markdown' });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        fileInput.files = dt.files;
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+      }, `# Notes ${i + 1}`, i);
+      await browser.pause(300);
+    }
+
+    const tabsAfter = await $$('#tab-list .tab-item');
+    expect(tabsAfter.length).toBe(countBefore + 2);
+  });
+
   it('탭 삭제 메뉴 클릭 시 탭이 제거된다', async function () {
     const tabsBefore = await $$('#tab-list .tab-item');
     if (tabsBefore.length < 2) return this.skip();

@@ -30,15 +30,30 @@ impl WatcherState {
 
 /// Look up the file path for a given tab title (filename or title without .md).
 /// Keys are canonical path strings; this searches by matching the filename component.
+/// Uses 2-pass approach: exact filename match first, then extension-stripped fallback.
 pub fn path_for_title(state: &WatcherState, title: &str) -> Option<PathBuf> {
     let files = state.files.lock().ok()?;
-    // Search values by comparing filename extracted from canonical path
+    // Pass 0: "dir/filename.md" display name → match parent + filename
+    if let Some((dir, fname)) = title.split_once('/') {
+        for canonical in files.values() {
+            if crate::commands::filename_from_path(canonical) == fname {
+                if let Some(parent) = canonical.parent().and_then(|p| p.file_name()) {
+                    if parent.to_string_lossy() == dir {
+                        return Some(canonical.clone());
+                    }
+                }
+            }
+        }
+    }
+    // Pass 1: exact filename match
     for canonical in files.values() {
-        let fname = crate::commands::filename_from_path(canonical);
-        if fname == title {
+        if crate::commands::filename_from_path(canonical) == title {
             return Some(canonical.clone());
         }
-        // Match without .md extension
+    }
+    // Pass 2: strip .md/.markdown extension
+    for canonical in files.values() {
+        let fname = crate::commands::filename_from_path(canonical);
         if let Some(stem) = fname.strip_suffix(".md").or_else(|| fname.strip_suffix(".markdown")) {
             if stem == title {
                 return Some(canonical.clone());
@@ -46,6 +61,24 @@ pub fn path_for_title(state: &WatcherState, title: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Compute display name from a file path using a snapshot of watched files.
+/// If another file with the same filename exists, prefix with parent directory.
+pub(crate) fn display_name_from_snapshot(
+    path: &std::path::Path,
+    files: &HashMap<String, PathBuf>,
+) -> String {
+    let filename = crate::commands::filename_from_path(path);
+    let has_conflict = files.values().any(|existing| {
+        crate::commands::filename_from_path(existing) == filename && existing != path
+    });
+    if has_conflict {
+        if let Some(parent) = path.parent().and_then(|p| p.file_name()) {
+            return format!("{}/{}", parent.to_string_lossy(), filename);
+        }
+    }
+    filename
 }
 
 fn now_millis() -> u64 {
@@ -129,11 +162,11 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
                         for (_key, watched_path) in watched_files.iter() {
                             if canon == *watched_path {
                                 last_emit.store(now, Ordering::Relaxed);
-                                let fname = crate::commands::filename_from_path(watched_path);
-                                dbg_log!("File changed: {}", fname);
+                                let display = display_name_from_snapshot(watched_path, &watched_files);
+                                dbg_log!("File changed: {}", display);
                                 if let Ok(content) = std::fs::read_to_string(event_path) {
                                     crate::commands::update_current_tab(
-                                        &app_handle, &content, &fname,
+                                        &app_handle, &content, &display,
                                     );
                                 }
                                 return;
@@ -410,6 +443,39 @@ mod tests {
     }
 
     #[test]
+    fn path_for_title_display_name_with_dir_prefix() {
+        // display_name_for_file produces "b/notes.md" for conflict; path_for_title must resolve it
+        let state = WatcherState::new();
+        let path_a = PathBuf::from("/tmp/a/notes.md");
+        let path_b = PathBuf::from("/tmp/b/notes.md");
+        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path_a.clone());
+        state.files.lock().unwrap().insert("/tmp/b/notes.md".to_string(), path_b.clone());
+        assert_eq!(path_for_title(&state, "b/notes.md"), Some(path_b));
+        assert_eq!(path_for_title(&state, "a/notes.md"), Some(path_a));
+    }
+
+    #[test]
+    fn path_for_title_display_name_nonexistent_dir() {
+        let state = WatcherState::new();
+        let path = PathBuf::from("/tmp/a/notes.md");
+        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path.clone());
+        // "c/notes.md" has correct filename but wrong dir prefix
+        assert_eq!(path_for_title(&state, "c/notes.md"), None);
+    }
+
+    #[test]
+    fn path_for_title_plain_filename_still_works_with_conflicts() {
+        // Even when conflicts exist, plain "notes.md" should still return one of them
+        let state = WatcherState::new();
+        let path_a = PathBuf::from("/tmp/a/notes.md");
+        let path_b = PathBuf::from("/tmp/b/notes.md");
+        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path_a.clone());
+        state.files.lock().unwrap().insert("/tmp/b/notes.md".to_string(), path_b.clone());
+        let result = path_for_title(&state, "notes.md");
+        assert!(result == Some(path_a) || result == Some(path_b));
+    }
+
+    #[test]
     fn path_for_title_same_filename_different_dirs() {
         let state = WatcherState::new();
         let path_a = PathBuf::from("/tmp/a/notes.md");
@@ -518,5 +584,55 @@ mod tests {
         register_file(&state, "b.md".to_string(), PathBuf::from("/tmp/b.md")).unwrap();
         register_file(&state, "c.md".to_string(), PathBuf::from("/tmp/c.md")).unwrap();
         assert_eq!(state.files.lock().unwrap().len(), 3);
+    }
+
+    // --- display_name_from_snapshot tests ---
+
+    #[test]
+    fn display_name_no_conflict() {
+        let mut files = HashMap::new();
+        files.insert("/tmp/notes.md".to_string(), PathBuf::from("/tmp/notes.md"));
+        assert_eq!(
+            display_name_from_snapshot(std::path::Path::new("/tmp/notes.md"), &files),
+            "notes.md"
+        );
+    }
+
+    #[test]
+    fn display_name_with_conflict() {
+        let mut files = HashMap::new();
+        files.insert("/tmp/a/notes.md".to_string(), PathBuf::from("/tmp/a/notes.md"));
+        files.insert("/tmp/b/notes.md".to_string(), PathBuf::from("/tmp/b/notes.md"));
+        assert_eq!(
+            display_name_from_snapshot(std::path::Path::new("/tmp/b/notes.md"), &files),
+            "b/notes.md"
+        );
+    }
+
+    #[test]
+    fn display_name_same_path_no_conflict() {
+        let mut files = HashMap::new();
+        files.insert("/tmp/notes.md".to_string(), PathBuf::from("/tmp/notes.md"));
+        // Same path should not count as a conflict
+        assert_eq!(
+            display_name_from_snapshot(std::path::Path::new("/tmp/notes.md"), &files),
+            "notes.md"
+        );
+    }
+
+    #[test]
+    fn display_name_three_way_conflict() {
+        let mut files = HashMap::new();
+        files.insert("/tmp/a/notes.md".to_string(), PathBuf::from("/tmp/a/notes.md"));
+        files.insert("/tmp/b/notes.md".to_string(), PathBuf::from("/tmp/b/notes.md"));
+        files.insert("/tmp/c/notes.md".to_string(), PathBuf::from("/tmp/c/notes.md"));
+        assert_eq!(
+            display_name_from_snapshot(std::path::Path::new("/tmp/a/notes.md"), &files),
+            "a/notes.md"
+        );
+        assert_eq!(
+            display_name_from_snapshot(std::path::Path::new("/tmp/c/notes.md"), &files),
+            "c/notes.md"
+        );
     }
 }
