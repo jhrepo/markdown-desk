@@ -48,7 +48,16 @@ xattr -rd com.apple.quarantine /Applications/Markdown\ Desk.app
 |--------|------|
 | `Cmd+O` | 마크다운 파일 열기 |
 | `Cmd+S` | 원본 파일에 저장 |
+| `Cmd+R` | 창 새로고침 (탭 상태 유지) |
+| `Cmd+T` | 새 탭 (최대 20개) |
+| `Cmd+W` | 현재 탭 닫기 |
 | `Cmd+F` | 프리뷰에서 텍스트 찾기 |
+| `Enter` / `Shift+Enter` | Find 바에서 다음 / 이전 매치로 이동 |
+| `Esc` | Find 바 또는 모달 닫기 |
+| `Cmd+Shift+S` | Split 뷰에서 스크롤 동기화 토글 |
+| `Tab` | 에디터에서 공백 2칸 삽입 |
+
+그 외 잘라내기 · 복사 · 붙여넣기 · 실행 취소 · 전체 화면 같은 표준 단축키는 macOS 기본 동작을 따릅니다.
 
 파일을 열면 외부 편집기에서 수정 시 자동으로 내용이 갱신됩니다.
 
@@ -114,9 +123,18 @@ Set Markdown Desk to open `.md` files by double-click:
 
 | Shortcut | Action |
 |----------|--------|
-| `Cmd+O` | Open markdown file |
-| `Cmd+S` | Save to original file |
+| `Cmd+O` | Open a markdown file |
+| `Cmd+S` | Save to the original file |
+| `Cmd+R` | Reload window (tabs preserved) |
+| `Cmd+T` | New tab (up to 20) |
+| `Cmd+W` | Close current tab |
 | `Cmd+F` | Find text in preview |
+| `Enter` / `Shift+Enter` | Next / previous match in Find bar |
+| `Esc` | Close Find bar or modal |
+| `Cmd+Shift+S` | Toggle scroll sync in Split view |
+| `Tab` | Insert 2 spaces in the editor |
+
+Other standard shortcuts like Cut, Copy, Paste, Undo, and Fullscreen follow the macOS defaults.
 
 Opened files are automatically refreshed when modified by an external editor.
 
