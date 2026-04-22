@@ -103,72 +103,194 @@
     }
   });
 
-  // --- Auto-update check (called on startup and from menu) ---
-  // manual=true shows feedback even when no update is available
-  window.checkForUpdates = function() { doCheckForUpdates(true); };
+  // --- Auto-update check ---
+  var MODE_MANUAL = 'manual';         // menu "Check for Updates…" — confirm dialog, shows "latest" when none
+  var MODE_BACKGROUND = 'background'; // periodic/startup check — in-app banner + title suffix, silent when none
+  var UPDATE_SNOOZED_KEY = 'markdown-desk-update-snoozed-version';
+  var UPDATE_LAST_CHECK_KEY = 'markdown-desk-update-last-check';
+  var UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  var UPDATE_BANNER_CLASS = 'bridge-update-banner';
   var _updateChecking = false;
-  async function doCheckForUpdates(manual) {
+  var _pendingUpdate = null; // cached updater object so banner can install without re-checking
+
+  window.checkForUpdates = function() { doCheckForUpdates(MODE_MANUAL); };
+
+  async function doCheckForUpdates(mode) {
     if (_updateChecking) return;
     _updateChecking = true;
     try {
       if (!window.__TAURI__ || !window.__TAURI__.updater) {
-        if (manual && window.__TAURI__ && window.__TAURI__.dialog) {
+        if (mode === MODE_MANUAL && window.__TAURI__ && window.__TAURI__.dialog) {
           await window.__TAURI__.dialog.message('Update check is not available.');
         }
         return;
       }
       var update = await window.__TAURI__.updater.check();
+      try { localStorage.setItem(UPDATE_LAST_CHECK_KEY, String(Date.now())); } catch (e) {}
       if (update) {
-        if (window.__TAURI__.dialog) {
-          var confirmed = await window.__TAURI__.dialog.confirm(
-            'New version ' + update.version + ' is available. Update now?',
-            { title: 'Update Available', kind: 'info' }
-          );
-          if (confirmed) {
-            try {
-              await update.downloadAndInstall();
-              // Ask user to restart
-              if (window.__TAURI__.dialog) {
-                var doRestart = await window.__TAURI__.dialog.confirm(
-                  'Update installed. Restart now?',
-                  { title: 'Update Complete', kind: 'info' }
-                );
-                if (doRestart && window.__TAURI__.process) {
-                  // Try both API names
-                  var proc = window.__TAURI__.process;
-                  if (typeof proc.relaunch === 'function') {
-                    await proc.relaunch();
-                  } else if (typeof proc.restart === 'function') {
-                    await proc.restart();
-                  } else if (typeof proc.exit === 'function') {
-                    await proc.exit(0);
-                  }
-                }
-              }
-            } catch (dlErr) {
-              console.log('[updater] Download failed:', dlErr);
-              if (window.__TAURI__ && window.__TAURI__.dialog) {
-                await window.__TAURI__.dialog.message(
-                  'Update failed: ' + String(dlErr),
-                  { title: 'Update Error' }
-                );
-              }
-            }
+        _pendingUpdate = update;
+        if (mode === MODE_MANUAL) {
+          await runUpdateInstall(update, { skipConfirm: false });
+        } else {
+          var snoozed = localStorage.getItem(UPDATE_SNOOZED_KEY);
+          if (snoozed !== update.version) {
+            // showUpdateBanner owns the full teardown→set sequence for the
+            // title suffix so the set invoke always wins over any nested
+            // hide from "replace prior banner" logic.
+            showUpdateBanner(update.version);
           }
         }
-      } else if (manual) {
+      } else if (mode === MODE_MANUAL) {
         if (window.__TAURI__.dialog) {
           await window.__TAURI__.dialog.message('You are using the latest version.', { title: 'Markdown Desk' });
         }
       }
     } catch (e) {
       console.log('[updater] Check failed:', e);
-      if (manual && window.__TAURI__ && window.__TAURI__.dialog) {
+      if (mode === MODE_MANUAL && window.__TAURI__ && window.__TAURI__.dialog) {
         await window.__TAURI__.dialog.message('Failed to check for updates.', { title: 'Error' });
       }
     } finally {
       _updateChecking = false;
     }
+  }
+
+  async function runUpdateInstall(update, opts) {
+    if (!window.__TAURI__ || !window.__TAURI__.dialog) return;
+    opts = opts || {};
+    if (!opts.skipConfirm) {
+      var confirmed = await window.__TAURI__.dialog.confirm(
+        'New version ' + update.version + ' is available. Update now?',
+        { title: 'Update Available', kind: 'info' }
+      );
+      if (!confirmed) return;
+    }
+    try {
+      await update.downloadAndInstall();
+      // Install succeeded — the snooze key targeted the *old* version and
+      // would be stale after relaunch. Clear it before we hand off to the
+      // new binary so it never influences the freshly-started process.
+      try { localStorage.removeItem(UPDATE_SNOOZED_KEY); } catch (e) {}
+      _pendingUpdate = null;
+      var doRestart = await window.__TAURI__.dialog.confirm(
+        'Update installed. Restart now?',
+        { title: 'Update Complete', kind: 'info' }
+      );
+      if (doRestart && window.__TAURI__.process) {
+        var proc = window.__TAURI__.process;
+        if (typeof proc.relaunch === 'function') {
+          await proc.relaunch();
+        } else if (typeof proc.restart === 'function') {
+          await proc.restart();
+        } else if (typeof proc.exit === 'function') {
+          await proc.exit(0);
+        }
+      }
+    } catch (dlErr) {
+      console.log('[updater] Download failed:', dlErr);
+      _pendingUpdate = null;
+      if (window.__TAURI__ && window.__TAURI__.dialog) {
+        await window.__TAURI__.dialog.message(
+          'Update failed: ' + String(dlErr),
+          { title: 'Update Error' }
+        );
+      }
+    }
+  }
+
+  function setUpdateTitleSuffix(suffix) {
+    if (!window.__TAURI_INTERNALS__) return;
+    window.__TAURI_INTERNALS__.invoke('set_update_title_suffix', { suffix: suffix || '' })
+      .catch(function(e) { console.warn('[updater] set_update_title_suffix failed:', e); });
+  }
+
+  // Banner styles — injected once, theme-adaptive via existing CSS vars.
+  var updateBannerStyle = document.createElement('style');
+  updateBannerStyle.textContent =
+    '.' + UPDATE_BANNER_CLASS + '{position:fixed;top:0;left:0;right:0;z-index:9998;display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--accent-color,#0969da);color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.15);}' +
+    '.' + UPDATE_BANNER_CLASS + '-msg{flex:1;}' +
+    '.' + UPDATE_BANNER_CLASS + ' button{padding:4px 12px;border:1px solid rgba(255,255,255,.55);border-radius:4px;background:transparent;color:#fff;font:inherit;cursor:pointer;}' +
+    '.' + UPDATE_BANNER_CLASS + ' button:hover{background:rgba(255,255,255,.18);}' +
+    '.' + UPDATE_BANNER_CLASS + '-update{background:#fff;color:var(--accent-color,#0969da);border-color:#fff;font-weight:600;}' +
+    '.' + UPDATE_BANNER_CLASS + '-update:hover{background:rgba(255,255,255,.88);}';
+  document.head.appendChild(updateBannerStyle);
+
+  function showUpdateBanner(version) {
+    // Tear down any prior banner DOM *without* touching the title — a full
+    // hide-dismiss here would clear the suffix we're about to set, and the
+    // final Rust invoke would be the clear (C-1).
+    removeBannerDom();
+    setUpdateTitleSuffix(' — Update Available');
+
+    var banner = document.createElement('div');
+    banner.className = UPDATE_BANNER_CLASS;
+    banner.setAttribute('data-version', version);
+
+    var msg = document.createElement('span');
+    msg.className = UPDATE_BANNER_CLASS + '-msg';
+    msg.textContent = '⬆ New version ' + version + ' is available';
+
+    var updateBtn = document.createElement('button');
+    updateBtn.type = 'button';
+    updateBtn.className = UPDATE_BANNER_CLASS + '-update';
+    updateBtn.textContent = 'Update';
+    updateBtn.addEventListener('click', async function() {
+      hideUpdateBanner();
+      if (_pendingUpdate) {
+        await runUpdateInstall(_pendingUpdate, { skipConfirm: true });
+      }
+    });
+
+    var laterBtn = document.createElement('button');
+    laterBtn.type = 'button';
+    laterBtn.className = UPDATE_BANNER_CLASS + '-later';
+    laterBtn.textContent = 'Later';
+    laterBtn.addEventListener('click', function() {
+      try { localStorage.setItem(UPDATE_SNOOZED_KEY, version); } catch (e) {}
+      _pendingUpdate = null;
+      hideUpdateBanner();
+    });
+
+    banner.appendChild(msg);
+    banner.appendChild(updateBtn);
+    banner.appendChild(laterBtn);
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+
+  // DOM-only teardown. Call this when you intend to follow it with another
+  // banner render (e.g., showUpdateBanner replacing its own prior banner).
+  function removeBannerDom() {
+    var existing = document.querySelector('.' + UPDATE_BANNER_CLASS);
+    if (existing) existing.remove();
+  }
+
+  // hideUpdateBanner is the full dismiss: DOM teardown + title suffix reset.
+  // Any path that tears down the notice for good (Later, Update, install
+  // cancel, install failure) goes through here and leaves the title clean.
+  function hideUpdateBanner() {
+    removeBannerDom();
+    setUpdateTitleSuffix('');
+  }
+
+  // @dev-hook-start
+  // SECURITY: This surface is stripped from release builds by
+  // scripts/prepare-frontend.sh when TAURI_ENV_DEBUG != 'true'. Keep it
+  // limited to banner DOM + snooze localStorage. Never add triggers that
+  // install, relaunch, or invoke privileged Tauri commands here.
+  window.__mdDeskUpdateInternals = {
+    showBanner: showUpdateBanner,
+    hideBanner: hideUpdateBanner,
+    getSnoozedVersion: function() { return localStorage.getItem(UPDATE_SNOOZED_KEY); },
+    clearSnooze: function() { localStorage.removeItem(UPDATE_SNOOZED_KEY); },
+  };
+  // @dev-hook-end
+
+  function shouldRunBackgroundCheck() {
+    var raw = localStorage.getItem(UPDATE_LAST_CHECK_KEY);
+    if (!raw) return true;
+    var last = parseInt(raw, 10);
+    if (!isFinite(last) || last <= 0) return true;
+    return (Date.now() - last) >= UPDATE_CHECK_INTERVAL_MS;
   }
   // --- Default app prompt (once per version; re-asks after update) ---
   var DEFAULT_APP_DISMISSED_KEY = 'markdown-desk-default-app-dismissed';
@@ -198,11 +320,20 @@
     }
   }
 
-  // Auto-check on startup: default app prompt first, then update check
+  // Auto-check on startup: default app prompt first, then update check.
+  // Startup check is gated on the 24h window so reopening the app multiple
+  // times a day doesn't re-hit the updater server.
   setTimeout(async function() {
     await promptDefaultApp();
-    doCheckForUpdates(false);
+    if (shouldRunBackgroundCheck()) {
+      doCheckForUpdates(MODE_BACKGROUND);
+    }
   }, 2000);
+
+  // Periodic 24h background check while the app stays open.
+  setInterval(function() {
+    doCheckForUpdates(MODE_BACKGROUND);
+  }, UPDATE_CHECK_INTERVAL_MS);
 
   // --- Hard reload: clear all state except global state and default-app dismissed ---
   var GLOBAL_STATE_KEY = 'markdownViewerGlobalState';

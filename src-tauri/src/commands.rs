@@ -379,6 +379,29 @@ pub fn set_default_md_app() -> Result<(), String> {
     crate::default_app::set_as_default_md_handler("com.markdowndesk.app")
 }
 
+pub(crate) fn build_update_title(suffix: &str) -> String {
+    const BASE: &str = "Markdown Desk";
+    if suffix.is_empty() {
+        BASE.to_string()
+    } else {
+        format!("{}{}", BASE, suffix)
+    }
+}
+
+/// Set the main window title to "Markdown Desk<suffix>".
+/// Used by the auto-update banner to surface a passive cue in the native
+/// title bar (which our in-app banner cannot reach on macOS).
+///
+/// Pass an empty suffix to restore the base title.
+#[tauri::command]
+pub fn set_update_title_suffix(app: tauri::AppHandle, suffix: String) -> Result<(), String> {
+    let title = build_update_title(&suffix);
+    match app.get_webview_window("main") {
+        Some(window) => window.set_title(&title).map_err(|e| e.to_string()),
+        None => Err("main window not available".to_string()),
+    }
+}
+
 pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")
@@ -1327,5 +1350,27 @@ mod tests {
         );
         let new_path = Path::new("/tmp/b/notes.md");
         assert_eq!(display_name_for_file(new_path, &state), "notes.md");
+    }
+
+    // --- build_update_title tests ---
+
+    #[test]
+    fn build_update_title_empty_suffix_returns_base() {
+        assert_eq!(build_update_title(""), "Markdown Desk");
+    }
+
+    #[test]
+    fn build_update_title_appends_suffix_verbatim() {
+        assert_eq!(
+            build_update_title(" — Update Available"),
+            "Markdown Desk — Update Available"
+        );
+    }
+
+    #[test]
+    fn build_update_title_suffix_is_not_trimmed() {
+        // Caller owns spacing; we must not silently strip it.
+        assert_eq!(build_update_title(" extra"), "Markdown Desk extra");
+        assert_eq!(build_update_title("extra"), "Markdown Deskextra");
     }
 }

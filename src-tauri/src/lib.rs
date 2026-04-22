@@ -460,3 +460,280 @@ mod bridge_script_tests {
     }
 }
 
+
+
+/// Structural invariants for `scripts/bridge.js` — auto-update check.
+///
+/// bridge.js has no JS unit runner here, so these grep-style tests guard
+/// the critical strings (mode names, localStorage keys, CSS classes,
+/// periodic interval) so that accidental drift between bridge.js and its
+/// e2e tests / Rust commands is caught at build time.
+#[cfg(test)]
+mod bridge_update_check_tests {
+    use std::path::PathBuf;
+
+    fn bridge_js() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("bridge.js");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+    }
+
+    #[test]
+    fn check_for_updates_defines_manual_and_background_modes() {
+        let s = bridge_js();
+        // Constants guard the canonical mode strings against typos at the
+        // definition site.
+        assert!(s.contains("MODE_MANUAL = 'manual'"), "MODE_MANUAL constant missing");
+        assert!(s.contains("MODE_BACKGROUND = 'background'"), "MODE_BACKGROUND constant missing");
+        // Both modes must be reached by at least one call site.
+        assert!(s.contains("doCheckForUpdates(MODE_MANUAL)"), "MODE_MANUAL call site missing");
+        assert!(s.contains("doCheckForUpdates(MODE_BACKGROUND)"), "MODE_BACKGROUND call site missing");
+    }
+
+    #[test]
+    fn check_interval_is_24_hours() {
+        let s = bridge_js();
+        assert!(
+            s.contains("24 * 60 * 60 * 1000"),
+            "24h interval constant missing or changed"
+        );
+        assert!(
+            s.contains("setInterval") && s.contains("UPDATE_CHECK_INTERVAL_MS"),
+            "periodic setInterval on UPDATE_CHECK_INTERVAL_MS missing"
+        );
+    }
+
+    #[test]
+    fn snooze_and_last_check_keys_are_stable() {
+        let s = bridge_js();
+        // These keys live in user localStorage across versions — renaming
+        // silently resets everyone's snooze state.
+        assert!(s.contains("'markdown-desk-update-snoozed-version'"),
+                "snooze localStorage key changed");
+        assert!(s.contains("'markdown-desk-update-last-check'"),
+                "last-check localStorage key changed");
+    }
+
+    #[test]
+    fn banner_exposes_stable_css_classes() {
+        let s = bridge_js();
+        // Referenced from e2e tests.
+        assert!(s.contains("'bridge-update-banner'"), "banner CSS class changed");
+    }
+
+    #[test]
+    fn banner_has_update_and_later_buttons() {
+        let s = bridge_js();
+        assert!(s.contains("'Update'"), "Update button label missing");
+        assert!(s.contains("'Later'"), "Later button label missing");
+    }
+
+    #[test]
+    fn title_suffix_invoked_via_rust_command() {
+        let s = bridge_js();
+        // macOS title bar can only be updated from Rust side; ensure the
+        // command name matches what lib.rs registers.
+        assert!(
+            s.contains("'set_update_title_suffix'"),
+            "set_update_title_suffix invoke missing"
+        );
+    }
+
+    #[test]
+    fn startup_check_respects_24h_window() {
+        let s = bridge_js();
+        // Prevents re-checking the updater server each time the user
+        // reopens the app within the same day.
+        assert!(
+            s.contains("shouldRunBackgroundCheck"),
+            "startup gate function missing"
+        );
+    }
+
+    #[test]
+    fn snoozed_version_suppresses_banner() {
+        let s = bridge_js();
+        // Banner must not appear when localStorage snooze matches the
+        // discovered update version.
+        assert!(
+            s.contains("snoozed !== update.version"),
+            "snooze check guard missing or syntactically changed"
+        );
+    }
+
+    #[test]
+    fn update_internals_exposed_for_e2e() {
+        let s = bridge_js();
+        // The e2e spec drives the banner without a real updater response.
+        assert!(
+            s.contains("window.__mdDeskUpdateInternals"),
+            "test hook window.__mdDeskUpdateInternals missing"
+        );
+    }
+
+    #[test]
+    fn update_internals_wrapped_in_dev_hook_markers() {
+        let s = bridge_js();
+        // prepare-frontend.sh strips everything between these markers in
+        // release builds. If they drift out of sync the production binary
+        // will leak the test hook.
+        assert!(s.contains("@dev-hook-start"), "@dev-hook-start marker missing");
+        assert!(s.contains("@dev-hook-end"), "@dev-hook-end marker missing");
+        // The hook must live between the markers.
+        let start = s.find("@dev-hook-start").unwrap();
+        let end = s.find("@dev-hook-end").unwrap();
+        let hook = s.find("window.__mdDeskUpdateInternals").unwrap();
+        assert!(start < hook && hook < end,
+                "__mdDeskUpdateInternals must be wrapped by @dev-hook markers");
+    }
+
+    #[test]
+    fn hide_banner_also_clears_title_suffix() {
+        let s = bridge_js();
+        // Review I-1: banner tear-down and title suffix reset must stay in
+        // lockstep. Locate hideUpdateBanner body and check it resets suffix.
+        let body_start = s.find("function hideUpdateBanner()")
+            .expect("hideUpdateBanner definition missing");
+        let body_slice = &s[body_start..];
+        let body_end = body_slice.find("\n  }\n")
+            .expect("hideUpdateBanner closing brace not found");
+        let body = &body_slice[..body_end];
+        assert!(
+            body.contains("setUpdateTitleSuffix('')"),
+            "hideUpdateBanner must reset title suffix so cancel/failure paths don't leave stale title"
+        );
+    }
+
+    #[test]
+    fn show_banner_reapplies_title_suffix_after_teardown() {
+        // Regression guard for C-1: hideUpdateBanner() clears the title
+        // suffix, and showUpdateBanner() used to call hideUpdateBanner() as a
+        // "replace any prior banner" step. When doCheckForUpdates set the
+        // suffix *before* calling showUpdateBanner, the nested hide silently
+        // wiped it again and the native title stayed "Markdown Desk" — the
+        // very cue the feature promised was never shown.
+        //
+        // Fix: showUpdateBanner must tear down the prior banner DOM without
+        // touching the title (removeBannerDom), then (re-)apply the suffix
+        // itself so the final invoke is the "set" one.
+        let s = bridge_js();
+        let body_start = s.find("function showUpdateBanner(version)")
+            .expect("showUpdateBanner definition missing");
+        let body_slice = &s[body_start..];
+        let body_end = body_slice.find("\n  }\n")
+            .expect("showUpdateBanner closing brace not found");
+        let body = &body_slice[..body_end];
+
+        let teardown_pos = body.find("removeBannerDom()")
+            .expect("showUpdateBanner must clear any prior banner via removeBannerDom()");
+        let suffix_pos = body.find("setUpdateTitleSuffix(' — Update Available')")
+            .expect("showUpdateBanner must (re-)apply title suffix so the background \
+                     check flow actually surfaces the cue");
+        assert!(
+            teardown_pos < suffix_pos,
+            "title suffix must be set AFTER removeBannerDom(), so the final invoke \
+             is the 'set' and not the 'clear'"
+        );
+        // The initial teardown at the top of showUpdateBanner must not be
+        // hideUpdateBanner() — that would clear the suffix we're about to
+        // set. It's OK for nested button handlers to call hideUpdateBanner()
+        // (that's a legitimate full dismiss), but nothing above the
+        // removeBannerDom() line may touch the title.
+        let early_hide = body[..teardown_pos].find("hideUpdateBanner()");
+        assert!(
+            early_hide.is_none(),
+            "showUpdateBanner must not call hideUpdateBanner() before removeBannerDom() \
+             — the suffix would be cleared immediately before being set"
+        );
+    }
+
+    #[test]
+    fn do_check_for_updates_does_not_set_title_suffix_directly() {
+        // Counterpart to the regression above: title suffix ownership must
+        // live in showUpdateBanner so the set/clear timeline is local. If
+        // doCheckForUpdates also sets the suffix, we risk the same race
+        // creeping back in via a future refactor.
+        let s = bridge_js();
+        let body_start = s.find("async function doCheckForUpdates(mode)")
+            .expect("doCheckForUpdates definition missing");
+        let body_slice = &s[body_start..];
+        let body_end = body_slice.find("\n  }\n")
+            .expect("doCheckForUpdates closing brace not found");
+        let body = &body_slice[..body_end];
+        assert!(
+            !body.contains("setUpdateTitleSuffix(' — Update Available')"),
+            "doCheckForUpdates must not set the title suffix directly; \
+             showUpdateBanner owns the full teardown→set sequence"
+        );
+    }
+
+    #[test]
+    fn install_success_clears_snooze() {
+        let s = bridge_js();
+        // Review I-2: the snooze key targets the pre-install version and is
+        // stale as soon as the install succeeds. Clear it before relaunch.
+        let install = s.find("await update.downloadAndInstall()")
+            .expect("downloadAndInstall call missing");
+        let after_install = &s[install..];
+        let snooze_remove = after_install.find("localStorage.removeItem(UPDATE_SNOOZED_KEY)");
+        let catch_block = after_install.find("} catch (dlErr)");
+        assert!(snooze_remove.is_some(), "snooze key must be cleared after successful install");
+        assert!(
+            snooze_remove.unwrap() < catch_block.unwrap_or(usize::MAX),
+            "snooze clear must happen inside the success path, before the catch block"
+        );
+    }
+}
+
+/// Structural invariants for `scripts/prepare-frontend.sh`.
+/// The shell script is the sole gate between dev-only hooks and
+/// release bundles; if its guard drifts, release builds leak test surfaces.
+#[cfg(test)]
+mod prepare_frontend_tests {
+    use std::path::PathBuf;
+
+    fn prepare_frontend_sh() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("prepare-frontend.sh");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+    }
+
+    #[test]
+    fn release_builds_strip_dev_hook_block() {
+        let s = prepare_frontend_sh();
+        // Must check TAURI_ENV_DEBUG and sed-delete the block bounded by
+        // the @dev-hook markers when not in debug mode.
+        assert!(s.contains("TAURI_ENV_DEBUG"), "TAURI_ENV_DEBUG guard missing");
+        assert!(
+            s.contains("@dev-hook-start") && s.contains("@dev-hook-end"),
+            "dev-hook marker references missing in prepare-frontend.sh"
+        );
+        assert!(
+            s.contains("sed -i '' '/@dev-hook-start/,/@dev-hook-end/d'"),
+            "block-delete sed command missing"
+        );
+    }
+
+    #[test]
+    fn debug_gate_semantics_preserved() {
+        // Guard against logic inversion: we must strip hooks when the env
+        // is NOT "true" (and default-false keeps a bare `bash prepare-…sh`
+        // run behaving like release). Flipping the operator to `=` or
+        // swapping the default to :-true would silently leak the dev hook
+        // into release bundles or vice versa. This test pins the exact
+        // comparison so that kind of one-character bug fails loudly.
+        let s = prepare_frontend_sh();
+        assert!(
+            s.contains(r#""${TAURI_ENV_DEBUG:-false}" != "true""#),
+            "debug gate must default to 'false' and test inequality with 'true' — \
+             a logic inversion would expose the test hook in release builds"
+        );
+    }
+}
+
