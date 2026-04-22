@@ -540,4 +540,123 @@
       hardReload();
     }
   }, true);
+
+  // --- Tab context menu (right-click) ---
+  // Close Tab / Close Other Tabs / Close Tabs to the Right / Close Tabs to the Left
+  // Reuses the existing per-tab 3-dot Delete action instead of manipulating the
+  // closure-scoped `tabs` array in the untouched Markdown-Viewer submodule.
+  (function() {
+    var MENU_CLASS = 'bridge-tab-context-menu';
+    var ITEM_CLASS = 'bridge-tab-context-item';
+    var menuEl = null;
+
+    var style = document.createElement('style');
+    style.textContent =
+      '.' + MENU_CLASS + '{position:fixed;z-index:10000;min-width:220px;padding:4px 0;background:var(--bg-color,#fff);border:1px solid var(--border-color,#ccc);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.18);font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;color:var(--text-color,#333);}' +
+      '.' + ITEM_CLASS + '{display:block;width:100%;padding:6px 14px;border:none;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit;}' +
+      '.' + ITEM_CLASS + ':hover:not(:disabled){background:var(--accent-color,#0969da);color:#fff;}' +
+      '.' + ITEM_CLASS + ':disabled{opacity:.4;cursor:default;}';
+    document.head.appendChild(style);
+
+    function closeMenu() {
+      if (menuEl) {
+        menuEl.remove();
+        menuEl = null;
+      }
+    }
+
+    function closeTabsByIds(listEl, ids) {
+      // Snapshot-iterate: the tab bar re-renders after each delete, but the
+      // remaining data-tab-id nodes still resolve to the new delete buttons.
+      ids.forEach(function(id) {
+        var sel = '[data-tab-id="' + CSS.escape(id) + '"] .tab-menu-item[data-action="delete"]';
+        var delBtn = listEl.querySelector(sel);
+        if (delBtn) delBtn.click();
+      });
+    }
+
+    function buildItem(label, ids, listEl) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = ITEM_CLASS;
+      btn.textContent = label;
+      if (!ids || ids.length === 0) {
+        btn.disabled = true;
+      } else {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          closeMenu();
+          closeTabsByIds(listEl, ids);
+        });
+      }
+      return btn;
+    }
+
+    function showMenu(x, y, targetId, listEl) {
+      closeMenu();
+
+      var items = listEl.querySelectorAll('[data-tab-id]');
+      var ids = Array.prototype.map.call(items, function(el) {
+        return el.getAttribute('data-tab-id');
+      });
+      var idx = ids.indexOf(targetId);
+      if (idx === -1) return;
+
+      var leftIds = ids.slice(0, idx);
+      var rightIds = ids.slice(idx + 1);
+      var otherIds = ids.filter(function(id) { return id !== targetId; });
+
+      menuEl = document.createElement('div');
+      menuEl.className = MENU_CLASS;
+      // Hide during measurement so the menu never paints at 0,0 before being
+      // moved to the click coordinate near the viewport edge.
+      menuEl.style.visibility = 'hidden';
+      menuEl.appendChild(buildItem('Close Tab', [targetId], listEl));
+      menuEl.appendChild(buildItem('Close Other Tabs', otherIds, listEl));
+      menuEl.appendChild(buildItem('Close Tabs to the Right', rightIds, listEl));
+      menuEl.appendChild(buildItem('Close Tabs to the Left', leftIds, listEl));
+      document.body.appendChild(menuEl);
+
+      // Keep within viewport
+      var rect = menuEl.getBoundingClientRect();
+      var px = x;
+      var py = y;
+      if (px + rect.width > window.innerWidth - 8) px = window.innerWidth - rect.width - 8;
+      if (py + rect.height > window.innerHeight - 8) py = window.innerHeight - rect.height - 8;
+      if (px < 8) px = 8;
+      if (py < 8) py = 8;
+      menuEl.style.left = px + 'px';
+      menuEl.style.top = py + 'px';
+      menuEl.style.visibility = 'visible';
+    }
+
+    function attach(listId) {
+      var listEl = document.getElementById(listId);
+      if (!listEl) return;
+      listEl.addEventListener('contextmenu', function(e) {
+        var tabEl = e.target.closest('.tab-item, .mobile-tab-item');
+        if (!tabEl || !listEl.contains(tabEl)) return;
+        var id = tabEl.getAttribute('data-tab-id');
+        if (!id) return;
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, id, listEl);
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      attach('tab-list');
+      attach('mobile-tab-list');
+    });
+
+    // Dismiss the menu. Outside clicks are caught on the capture phase of
+    // mousedown so the menu closes before any downstream click handler runs.
+    document.addEventListener('mousedown', function(e) {
+      if (menuEl && !menuEl.contains(e.target)) closeMenu();
+    }, true);
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && menuEl) closeMenu();
+    });
+    window.addEventListener('blur', closeMenu);
+    window.addEventListener('resize', closeMenu);
+  })();
 })();

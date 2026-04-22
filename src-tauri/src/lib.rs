@@ -364,3 +364,99 @@ mod tests {
     }
 }
 
+/// Structural invariants for `scripts/bridge.js`.
+///
+/// bridge.js has no JS-level unit runner in this repo, so these tests guard
+/// the critical strings (menu labels, DOM selectors, attachment points) that
+/// the tab context-menu feature depends on. If a grep-check fails, the
+/// feature is likely broken — either the upstream submodule renamed
+/// something, or bridge.js was edited without updating both code paths.
+#[cfg(test)]
+mod bridge_script_tests {
+    use std::path::PathBuf;
+
+    fn bridge_js() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("bridge.js");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+    }
+
+    #[test]
+    fn tab_context_menu_defines_all_four_labels() {
+        let s = bridge_js();
+        assert!(s.contains("'Close Tab'"), "missing 'Close Tab' label");
+        assert!(s.contains("'Close Other Tabs'"), "missing 'Close Other Tabs' label");
+        assert!(s.contains("'Close Tabs to the Right'"), "missing 'Close Tabs to the Right' label");
+        assert!(s.contains("'Close Tabs to the Left'"), "missing 'Close Tabs to the Left' label");
+    }
+
+    #[test]
+    fn tab_context_menu_attaches_to_desktop_and_mobile_lists() {
+        let s = bridge_js();
+        assert!(s.contains("attach('tab-list')"), "desktop tab list not attached");
+        assert!(s.contains("attach('mobile-tab-list')"), "mobile tab list not attached");
+    }
+
+    #[test]
+    fn tab_context_menu_targets_both_tab_item_variants() {
+        let s = bridge_js();
+        // Desktop uses .tab-item; mobile uses .mobile-tab-item — both must match.
+        assert!(
+            s.contains(".tab-item, .mobile-tab-item"),
+            "contextmenu target selector must cover both desktop and mobile"
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_depends_on_data_tab_id_attribute() {
+        let s = bridge_js();
+        // Every close action resolves the tab by its data-tab-id attribute.
+        // If upstream renames it, the menu silently no-ops.
+        assert!(
+            s.contains("data-tab-id"),
+            "data-tab-id attribute lookup missing — upstream may have renamed it"
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_reuses_upstream_delete_action() {
+        let s = bridge_js();
+        // Tabs[] lives in a closure in the untouched submodule, so we close
+        // tabs by clicking the upstream per-tab Delete button. If this
+        // selector drifts, every close action silently no-ops.
+        assert!(
+            s.contains(r#".tab-menu-item[data-action="delete"]"#),
+            "delete-button selector missing — upstream renamed or removed it?"
+        );
+    }
+
+    #[test]
+    fn tab_context_menu_dismisses_on_escape_and_outside_click() {
+        let s = bridge_js();
+        assert!(s.contains("'Escape'"), "Escape handler missing");
+        assert!(s.contains("mousedown"), "outside-click handler missing");
+        assert!(s.contains("closeMenu"), "closeMenu function missing");
+    }
+
+    #[test]
+    fn tab_context_menu_uses_stable_css_classes() {
+        let s = bridge_js();
+        // Referenced from e2e tests — keep these stable.
+        assert!(s.contains("'bridge-tab-context-menu'"), "menu CSS class changed");
+        assert!(s.contains("'bridge-tab-context-item'"), "item CSS class changed");
+    }
+
+    #[test]
+    fn tab_context_menu_prevents_default_browser_menu() {
+        let s = bridge_js();
+        // Without preventDefault the native OS context menu would also appear.
+        assert!(
+            s.contains("e.preventDefault()"),
+            "contextmenu handler must preventDefault"
+        );
+    }
+}
+
