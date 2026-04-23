@@ -60,6 +60,7 @@ pub fn run() {
                 commands::export_binary_file,
                 commands::is_default_md_app,
                 commands::set_default_md_app,
+                commands::set_update_title_suffix,
             ])
         .setup(|app| {
             dbg_log!("Setup: building menu");
@@ -733,6 +734,55 @@ mod prepare_frontend_tests {
             s.contains(r#""${TAURI_ENV_DEBUG:-false}" != "true""#),
             "debug gate must default to 'false' and test inequality with 'true' — \
              a logic inversion would expose the test hook in release builds"
+        );
+    }
+}
+
+
+/// Regression guard for the Rust side of the updater title suffix.
+///
+/// `scripts/bridge.js` invokes the Tauri command `set_update_title_suffix`
+/// when the updater banner appears or is dismissed, but the Rust command
+/// only reaches the webview if it is registered in the `generate_handler!`
+/// macro in `lib.rs`. When the handler registration is missing, the
+/// Tauri-command function is dead (Rust compiler warns "never used"), and
+/// every bridge.js invoke fails silently via the `.catch()` — the user
+/// notices nothing, but the title bar update cue is gone.
+///
+/// This module pins the Rust side of that contract. A sibling test
+/// `bridge_update_check_tests::title_suffix_invoked_via_rust_command`
+/// pins the JS side; together they catch drift in either direction.
+#[cfg(test)]
+mod rust_invoke_handler_tests {
+    /// Return the production portion of `lib.rs` with `#[cfg(test)]` modules
+    /// stripped. Without this, searches would match the test code itself
+    /// (including this very comment and assertion strings) and pass even
+    /// when the production handler list is missing the command.
+    fn production_src() -> &'static str {
+        const FULL: &str = include_str!("lib.rs");
+        match FULL.find("#[cfg(test)]") {
+            Some(idx) => &FULL[..idx],
+            None => FULL,
+        }
+    }
+
+    #[test]
+    fn set_update_title_suffix_is_registered_in_invoke_handler() {
+        let src = production_src();
+        // Locate the generate_handler! block and assert the command is in it.
+        let handler_start = src
+            .find("tauri::generate_handler![")
+            .expect("invoke_handler registration block missing");
+        let handler_end = src[handler_start..]
+            .find(']')
+            .map(|e| handler_start + e)
+            .expect("invoke_handler block is not closed");
+        let block = &src[handler_start..=handler_end];
+        assert!(
+            block.contains("set_update_title_suffix"),
+            "set_update_title_suffix must be listed in generate_handler![] \
+             (bridge.js invokes this command; without registration every \
+             call silently fails)"
         );
     }
 }
