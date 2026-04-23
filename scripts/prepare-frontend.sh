@@ -18,6 +18,7 @@ cp -r "$SUBMODULE_DIR/assets" "$FRONTEND_DIR/" 2>/dev/null || true
 
 # Copy bridge script and inject app version
 cp "$SCRIPT_DIR/bridge.js" "$FRONTEND_DIR/"
+cp "$SCRIPT_DIR/toc.js" "$FRONTEND_DIR/"
 APP_VERSION=$(grep '"version"' "$PROJECT_DIR/src-tauri/tauri.conf.json" | head -1 | sed 's/.*"\([0-9.]*\)".*/\1/')
 if [ -z "$APP_VERSION" ]; then
   echo "ERROR: Could not extract version from tauri.conf.json" >&2
@@ -35,5 +36,9 @@ fi
 
 # Inject bridge.js into the copied index.html (in <head>, before other scripts)
 sed -i '' 's|</head>|<script src="bridge.js"></script></head>|' "$FRONTEND_DIR/index.html"
+
+# Inject toc.js as a deferred script so it runs after DOMContentLoaded.
+# Placed before </body> to ensure script.js has already attached handlers.
+sed -i '' 's|</body>|<script src="toc.js"></script></body>|' "$FRONTEND_DIR/index.html"
 
 echo "Frontend prepared successfully."
