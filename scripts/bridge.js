@@ -286,11 +286,11 @@
   // @dev-hook-end
 
   function shouldRunBackgroundCheck() {
-    var raw = localStorage.getItem(UPDATE_LAST_CHECK_KEY);
-    if (!raw) return true;
-    var last = parseInt(raw, 10);
-    if (!isFinite(last) || last <= 0) return true;
-    return (Date.now() - last) >= UPDATE_CHECK_INTERVAL_MS;
+    return window.__bridgeHelpers.shouldRunBackgroundCheck(
+      localStorage.getItem(UPDATE_LAST_CHECK_KEY),
+      Date.now(),
+      UPDATE_CHECK_INTERVAL_MS
+    );
   }
   // --- Default app prompt (once per version; re-asks after update) ---
   var DEFAULT_APP_DISMISSED_KEY = 'markdown-desk-default-app-dismissed';
@@ -350,8 +350,7 @@
   if (window.__TAURI_INTERNALS__) {
     function getExportBaseName() {
       var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
-      var name = activeEl ? activeEl.textContent.trim() : 'document';
-      return name.replace(/\.md$/i, '') || 'document';
+      return window.__bridgeHelpers.getExportBaseName(activeEl ? activeEl.textContent : null);
     }
 
     // Override FileSaver.js saveAs() for MD and HTML exports

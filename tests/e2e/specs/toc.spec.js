@@ -117,4 +117,96 @@ describe('TOC 플로팅 드로어', () => {
     // Heading should be within a few px of pane top
     expect(Math.abs(after.delta)).toBeLessThan(5);
   });
+
+  it('사용자가 preview 를 스크롤하면 drawer 의 active 헤딩이 따라간다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Large document so each heading sits far enough apart to exercise the
+    // scroll→active handler.
+    await browser.execute(() => {
+      const ta = document.getElementById('markdown-editor');
+      const filler = Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n\n');
+      ta.value =
+        '# Alpha\n\n' + filler +
+        '\n\n## Bravo\n\n' + filler +
+        '\n\n### Charlie\n\n' + filler + '\n';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await browser.pause(600);
+
+    await fab.click();
+    await browser.pause(200);
+
+    // Programmatically scroll to where "Bravo" is at pane top. We compute
+    // the exact offset the same way toc.js does so the test locks in both
+    // the scroll math *and* the active-highlight handler together.
+    await browser.execute(() => {
+      const pane = document.querySelector('.preview-pane');
+      const h2 = document.querySelector('#markdown-preview h2');
+      const delta = h2.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+      pane.scrollTop = pane.scrollTop + delta;
+      pane.dispatchEvent(new Event('scroll'));
+    });
+    await browser.pause(200);
+
+    const activeAfterBravo = await browser.execute(() => {
+      const active = document.querySelector('.toc-drawer-item.active');
+      return active ? active.textContent : null;
+    });
+    expect(activeAfterBravo).toBe('Bravo');
+
+    // Scroll further so Charlie reaches pane top.
+    await browser.execute(() => {
+      const pane = document.querySelector('.preview-pane');
+      const h3 = document.querySelector('#markdown-preview h3');
+      const delta = h3.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+      pane.scrollTop = pane.scrollTop + delta;
+      pane.dispatchEvent(new Event('scroll'));
+    });
+    await browser.pause(200);
+
+    const activeAfterCharlie = await browser.execute(() => {
+      const active = document.querySelector('.toc-drawer-item.active');
+      return active ? active.textContent : null;
+    });
+    expect(activeAfterCharlie).toBe('Charlie');
+  });
+
+  it('editor 모드로 전환하면 FAB 와 drawer 가 모두 숨겨진다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Start from split/preview so realign() marks both visible.
+    const splitBtn = await $('.view-mode-btn[data-mode="split"]');
+    if (await splitBtn.isExisting()) {
+      await splitBtn.click();
+      await browser.pause(300);
+    }
+
+    const beforeHidden = await browser.execute(() => ({
+      fab: document.getElementById('toc-fab').hidden,
+      drawer: document.getElementById('toc-drawer').hidden,
+    }));
+    expect(beforeHidden.fab).toBe(false);
+
+    const editorBtn = await $('.view-mode-btn[data-mode="editor"]');
+    if (!(await editorBtn.isExisting())) return this.skip();
+    await editorBtn.click();
+    // toc.js polls realign 200ms after view-mode click.
+    await browser.pause(400);
+
+    const afterHidden = await browser.execute(() => ({
+      fab: document.getElementById('toc-fab').hidden,
+      drawer: document.getElementById('toc-drawer').hidden,
+    }));
+    expect(afterHidden.fab).toBe(true);
+    expect(afterHidden.drawer).toBe(true);
+
+    // Restore split so subsequent specs aren't affected.
+    if (await splitBtn.isExisting()) {
+      await splitBtn.click();
+      await browser.pause(300);
+    }
+  });
 });
