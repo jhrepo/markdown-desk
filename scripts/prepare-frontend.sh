@@ -18,6 +18,7 @@ cp -r "$SUBMODULE_DIR/assets" "$FRONTEND_DIR/" 2>/dev/null || true
 
 # Copy bridge script and inject app version
 cp "$SCRIPT_DIR/bridge.js" "$FRONTEND_DIR/"
+cp "$SCRIPT_DIR/bridge-helpers.js" "$FRONTEND_DIR/"
 cp "$SCRIPT_DIR/toc.js" "$FRONTEND_DIR/"
 APP_VERSION=$(grep '"version"' "$PROJECT_DIR/src-tauri/tauri.conf.json" | head -1 | sed 's/.*"\([0-9.]*\)".*/\1/')
 if [ -z "$APP_VERSION" ]; then
@@ -34,8 +35,10 @@ if [ "${TAURI_ENV_DEBUG:-false}" != "true" ]; then
   sed -i '' '/@dev-hook-start/,/@dev-hook-end/d' "$FRONTEND_DIR/bridge.js"
 fi
 
-# Inject bridge.js into the copied index.html (in <head>, before other scripts)
-sed -i '' 's|</head>|<script src="bridge.js"></script></head>|' "$FRONTEND_DIR/index.html"
+# Inject bridge.js into the copied index.html (in <head>, before other scripts).
+# bridge-helpers.js must load first since bridge.js reads from
+# window.__bridgeHelpers at call sites.
+sed -i '' 's|</head>|<script src="bridge-helpers.js"></script><script src="bridge.js"></script></head>|' "$FRONTEND_DIR/index.html"
 
 # Inject toc.js as a deferred script so it runs after DOMContentLoaded.
 # Placed before </body> to ensure script.js has already attached handlers.
