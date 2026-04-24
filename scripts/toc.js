@@ -137,6 +137,8 @@
       drawer.style.top = (rect.top + GAP) + 'px';
       drawer.style.left = (rect.right - GAP - DRAWER_WIDTH) + 'px';
       drawer.style.maxHeight = (rect.height - GAP * 2) + 'px';
+      // Pane geometry changed → cached heading offsets are stale.
+      recomputeOffsets();
     }
     realign();
     window.addEventListener('resize', realign);
@@ -179,6 +181,26 @@
         });
       });
       renderDrawer();
+      recomputeOffsets();
+    }
+
+    // "Scroll offset where this heading would sit at the pane top" — stable
+    // across scroll events and only changes when layout does. Computing it
+    // inside every scroll event is n+1 `getBoundingClientRect` calls per
+    // frame on long docs, which thrashes layout. Cache once per rebuild /
+    // realign and read from the cache on scroll.
+    function recomputeOffsets() {
+      if (!state.headings.length) {
+        state.offsets = [];
+        return;
+      }
+      var paneRect = previewPane.getBoundingClientRect();
+      var st = previewPane.scrollTop;
+      state.offsets = state.headings.map(function (h) {
+        return computeScrollTarget(
+          h.element.getBoundingClientRect().top, paneRect.top, st
+        );
+      });
     }
 
     function renderDrawer() {
@@ -227,20 +249,20 @@
       requestAnimationFrame(function () { requestAnimationFrame(snap); });
     }
 
+    // RAF-coalesce scroll events: the native scroll event can fire dozens
+    // of times per frame, but the active-heading decision only needs one
+    // read per frame. `scrollRAF` holds the pending callback id so repeat
+    // events during the same frame are dropped.
+    var scrollRAF = 0;
     previewPane.addEventListener('scroll', function () {
-      if (!state.headings.length) return;
-      // Use bounding-rect math instead of `offsetTop` so active tracking is
-      // correct regardless of whether .preview-pane is the offsetParent.
-      // A heading's "scroll offset where it would pin to pane top" is
-      // exactly what computeScrollTarget returns.
-      var paneRect = previewPane.getBoundingClientRect();
-      var st = previewPane.scrollTop;
-      var offsets = state.headings.map(function (h) {
-        return computeScrollTarget(h.element.getBoundingClientRect().top, paneRect.top, st);
+      if (!state.offsets || !state.offsets.length) return;
+      if (scrollRAF) return;
+      scrollRAF = requestAnimationFrame(function () {
+        scrollRAF = 0;
+        var idx = activeHeadingIndex(previewPane.scrollTop, state.offsets);
+        var rows = drawer.querySelectorAll('.toc-drawer-item');
+        rows.forEach(function (r, i) { r.classList.toggle('active', i === idx); });
       });
-      var idx = activeHeadingIndex(st, offsets);
-      var rows = drawer.querySelectorAll('.toc-drawer-item');
-      rows.forEach(function (r, i) { r.classList.toggle('active', i === idx); });
     });
 
     var observer = new MutationObserver(function () {

@@ -61,37 +61,52 @@ describe('키보드 단축키', () => {
     expect(calls.some((c) => c.cmd === 'native_open_file')).toBe(true);
   });
 
-  it('Cmd+R 는 hardReload 를 호출해 localStorage 를 보존해 정리한다', async () => {
-    // hardReload clears localStorage except markdownViewerGlobalState and
-    // markdown-desk-default-app-dismissed, then reloads the page. Seed a
-    // throw-away key and assert it's gone after reload; seed a preserved
-    // key and assert it survives.
-    await browser.execute(() => {
+  it('Cmd+R 는 hardReload 를 수행해 ephemeral 키는 지우고 global state 는 유지한다', async () => {
+    // This test reloads the page mid-spec, so leaking localStorage into
+    // subsequent specs is easy. Snapshot the real globalState, add a
+    // unique test marker (not a theme), and restore the snapshot in
+    // finally — keeps theme-dependent specs (theme.spec.js, etc.) clean.
+    const preGlobal = await browser.execute(() =>
+      localStorage.getItem('markdownViewerGlobalState')
+    );
+
+    await browser.execute((originalGlobal) => {
       localStorage.setItem('sc-test-ephemeral', 'should-go');
-      // Preserve theme-ish key structure
-      localStorage.setItem(
-        'markdownViewerGlobalState',
-        JSON.stringify({ theme: 'dark', sc: 'keep-me' })
-      );
-    });
+      const state = originalGlobal ? JSON.parse(originalGlobal) : {};
+      state.__scTestMarker = 'keep-me';
+      localStorage.setItem('markdownViewerGlobalState', JSON.stringify(state));
+    }, preGlobal);
 
-    await browser.execute(() => {
-      const ev = new KeyboardEvent('keydown', {
-        key: 'r',
-        metaKey: true,
-        bubbles: true,
-        cancelable: true,
+    try {
+      await browser.execute(() => {
+        const ev = new KeyboardEvent('keydown', {
+          key: 'r',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        document.dispatchEvent(ev);
       });
-      document.dispatchEvent(ev);
-    });
-    // window.location.reload() kicks in; wait for the page to come back.
-    await browser.pause(1500);
+      // window.location.reload() kicks in; wait for the page to come back.
+      await browser.pause(1500);
 
-    const post = await browser.execute(() => ({
-      ephemeral: localStorage.getItem('sc-test-ephemeral'),
-      preserved: localStorage.getItem('markdownViewerGlobalState'),
-    }));
-    expect(post.ephemeral).toBe(null);
-    expect(post.preserved).toContain('keep-me');
+      const post = await browser.execute(() => ({
+        ephemeral: localStorage.getItem('sc-test-ephemeral'),
+        marker: JSON.parse(
+          localStorage.getItem('markdownViewerGlobalState') || '{}'
+        ).__scTestMarker,
+      }));
+      expect(post.ephemeral).toBe(null);
+      expect(post.marker).toBe('keep-me');
+    } finally {
+      await browser.execute((originalGlobal) => {
+        if (originalGlobal !== null) {
+          localStorage.setItem('markdownViewerGlobalState', originalGlobal);
+        } else {
+          localStorage.removeItem('markdownViewerGlobalState');
+        }
+        localStorage.removeItem('sc-test-ephemeral');
+      }, preGlobal);
+    }
   });
 });
