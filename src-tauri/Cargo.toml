@@ -14,10 +14,19 @@ tauri-plugin-process = "2"
 tauri-plugin-window-state = "2"
 # Powers the e2e harness (TAURI_WEBDRIVER_PORT). Cargo does not support
 # `[target.'cfg(debug_assertions)'.dependencies]` — that cfg key silently
-# failed and the crate was linked in every build anyway. Declaring it as a
-# regular dep is a no-op for binary size; the `#[cfg(debug_assertions)]`
-# gate on `plugin(init())` in lib.rs is where the runtime-only inclusion
-# actually works.
+# failed and the crate was linked in every build anyway. Declared as a
+# regular dep; the `#[cfg(debug_assertions)]` gate on `plugin(init())` in
+# lib.rs is where runtime inclusion actually works, so the webdriver
+# server never binds to a port in release builds.
+#
+# Verified on the v26.4.6 release build (LTO + strip from tauri.conf.json):
+#   nm -U target/release/markdown-desk | grep -c webdriver         → 0
+#   strings -a target/release/markdown-desk | grep -c webdriver    → 1
+# The one string hit is a single occurrence inside Tauri's plugin ACL
+# manifest blob — a few bytes of metadata, not executable code. No
+# defined symbols, no standalone webdriver strings. If this ever
+# regresses we can promote to an optional feature and enable it only on
+# dev / e2e builds.
 tauri-plugin-webdriver = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

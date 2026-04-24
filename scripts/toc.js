@@ -101,7 +101,11 @@
     var previewPane = preview.closest('.preview-pane') || preview.parentElement;
     injectStyles(doc);
 
-    var state = { headings: [] };
+    // state.rows and state.offsets mirror each other index-for-index and are
+    // replaced together inside rebuild(), so consumers always see a matched
+    // pair. Initialize both to [] so the scroll handler can run safely even
+    // before the first rebuild.
+    var state = { headings: [], rows: [], offsets: [], rebuildTimer: 0 };
 
     var fab = doc.createElement('button');
     fab.id = 'toc-fab';
@@ -137,15 +141,33 @@
       drawer.style.top = (rect.top + GAP) + 'px';
       drawer.style.left = (rect.right - GAP - DRAWER_WIDTH) + 'px';
       drawer.style.maxHeight = (rect.height - GAP * 2) + 'px';
+      // Pane geometry changed → cached heading offsets are stale.
+      recomputeOffsets();
+    }
+    // realign() does a few `getBoundingClientRect` reads and style writes,
+    // then a full `recomputeOffsets` over all headings. Window resize and
+    // ResizeObserver can both burst at >1 event per frame during a drag —
+    // without this throttle we'd thrash layout proportional to heading
+    // count on every burst. RAF collapses bursts to at most one run per
+    // frame; we still call realign() synchronously once at install so the
+    // initial paint is positioned correctly.
+    var realignRAF = 0;
+    function realignThrottled() {
+      if (realignRAF) return;
+      realignRAF = requestAnimationFrame(function () {
+        realignRAF = 0;
+        realign();
+      });
     }
     realign();
-    window.addEventListener('resize', realign);
+    window.addEventListener('resize', realignThrottled);
     if (typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(realign).observe(previewPane);
+      new ResizeObserver(realignThrottled).observe(previewPane);
     }
     // View-mode toggle (editor/split/preview) mutates classes on
     // .content-container without changing sizes immediately; poll once
-    // after the CSS transition settles.
+    // after the CSS transition settles. Not RAF-throttled because it's a
+    // single scheduled call, not a burst source.
     doc.querySelectorAll('.view-mode-btn, .mobile-view-mode-btn').forEach(function (b) {
       b.addEventListener('click', function () { setTimeout(realign, 200); });
     });
@@ -179,11 +201,32 @@
         });
       });
       renderDrawer();
+      recomputeOffsets();
+    }
+
+    // "Scroll offset where this heading would sit at the pane top" — stable
+    // across scroll events and only changes when layout does. Computing it
+    // inside every scroll event is n+1 `getBoundingClientRect` calls per
+    // frame on long docs, which thrashes layout. Cache once per rebuild /
+    // realign and read from the cache on scroll.
+    function recomputeOffsets() {
+      if (!state.headings.length) {
+        state.offsets = [];
+        return;
+      }
+      var paneRect = previewPane.getBoundingClientRect();
+      var st = previewPane.scrollTop;
+      state.offsets = state.headings.map(function (h) {
+        return computeScrollTarget(
+          h.element.getBoundingClientRect().top, paneRect.top, st
+        );
+      });
     }
 
     function renderDrawer() {
       var list = drawer.querySelector('.toc-drawer-list');
       list.innerHTML = '';
+      state.rows = [];
       if (!state.headings.length) {
         var empty = doc.createElement('div');
         empty.className = 'toc-drawer-empty';
@@ -201,6 +244,7 @@
           scrollHeadingIntoPane(h.element);
         });
         list.appendChild(a);
+        state.rows.push(a);
       });
     }
 
@@ -227,25 +271,29 @@
       requestAnimationFrame(function () { requestAnimationFrame(snap); });
     }
 
+    // RAF-coalesce scroll events: the native scroll event can fire dozens
+    // of times per frame, but the active-heading decision only needs one
+    // read per frame. `scrollRAF` holds the pending callback id so repeat
+    // events during the same frame are dropped.
+    var scrollRAF = 0;
     previewPane.addEventListener('scroll', function () {
-      if (!state.headings.length) return;
-      // Use bounding-rect math instead of `offsetTop` so active tracking is
-      // correct regardless of whether .preview-pane is the offsetParent.
-      // A heading's "scroll offset where it would pin to pane top" is
-      // exactly what computeScrollTarget returns.
-      var paneRect = previewPane.getBoundingClientRect();
-      var st = previewPane.scrollTop;
-      var offsets = state.headings.map(function (h) {
-        return computeScrollTarget(h.element.getBoundingClientRect().top, paneRect.top, st);
+      if (!state.offsets || !state.offsets.length) return;
+      if (scrollRAF) return;
+      scrollRAF = requestAnimationFrame(function () {
+        scrollRAF = 0;
+        var idx = activeHeadingIndex(previewPane.scrollTop, state.offsets);
+        var rows = state.rows || [];
+        for (var i = 0; i < rows.length; i++) {
+          rows[i].classList.toggle('active', i === idx);
+        }
       });
-      var idx = activeHeadingIndex(st, offsets);
-      var rows = drawer.querySelectorAll('.toc-drawer-item');
-      rows.forEach(function (r, i) { r.classList.toggle('active', i === idx); });
     });
 
     var observer = new MutationObserver(function () {
-      if (state._t) clearTimeout(state._t);
-      state._t = setTimeout(rebuild, 80);
+      // Debounce: Markdown re-render fires a burst of childList/characterData
+      // mutations; one rebuild after the burst settles is enough.
+      if (state.rebuildTimer) clearTimeout(state.rebuildTimer);
+      state.rebuildTimer = setTimeout(rebuild, 80);
     });
     observer.observe(preview, { childList: true, subtree: true, characterData: true });
     rebuild();
