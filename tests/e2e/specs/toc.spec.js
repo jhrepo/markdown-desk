@@ -1,4 +1,27 @@
 describe('TOC 플로팅 드로어', () => {
+  // Each test should start with the drawer closed and the preview pane
+  // visible. The TOC's FAB/drawer state persists across tests in the same
+  // worker, and earlier tests leave the drawer open — that makes realign()
+  // keep the FAB hidden which then fails isolation assertions in later
+  // tests (most visibly the editor-mode hide test).
+  beforeEach(async () => {
+    await browser.execute(() => {
+      const d = document.getElementById('toc-drawer');
+      const f = document.getElementById('toc-fab');
+      if (d && d.classList.contains('open')) {
+        d.classList.remove('open');
+        if (f) f.hidden = false;
+      }
+    });
+    // Also make sure the view isn't stuck in editor-only mode from a
+    // prior test — split keeps the preview pane visible.
+    const splitBtn = await $('.view-mode-btn[data-mode="split"]');
+    if (await splitBtn.isExisting()) {
+      await splitBtn.click();
+      await browser.pause(250);
+    }
+  });
+
   async function seedPreviewWithHeadings() {
     // Populate the editor with a small document containing three distinct
     // headings and wait for the preview to re-render. We use `input` event
@@ -116,5 +139,116 @@ describe('TOC 플로팅 드로어', () => {
     expect(after.scrollTop).toBeGreaterThan(100);
     // Heading should be within a few px of pane top
     expect(Math.abs(after.delta)).toBeLessThan(5);
+  });
+
+  it('사용자가 preview 를 스크롤하면 drawer 의 active 헤딩이 따라간다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Large document so each heading sits far enough apart to exercise the
+    // scroll→active handler.
+    await browser.execute(() => {
+      const ta = document.getElementById('markdown-editor');
+      const filler = Array.from({ length: 60 }, (_, i) => `line ${i}`).join('\n\n');
+      ta.value =
+        '# Alpha\n\n' + filler +
+        '\n\n## Bravo\n\n' + filler +
+        '\n\n### Charlie\n\n' + filler + '\n';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // Wait until the TOC has rebuilt — we need the drawer rows to match
+    // the 3 headings we seeded AND the pane tall enough for Bravo to sit
+    // below the fold. Without this the test raced the MutationObserver +
+    // recomputeOffsets and found stale offsets (all zero → always Alpha).
+    await browser.waitUntil(
+      async () => {
+        return browser.execute(() => {
+          const rows = document.querySelectorAll('.toc-drawer-item');
+          const pane = document.querySelector('.preview-pane');
+          return rows.length === 3 && pane.scrollHeight > pane.clientHeight + 200;
+        });
+      },
+      { timeout: 3000, timeoutMsg: 'TOC rows or pane height not ready' }
+    );
+
+    await fab.click();
+    await browser.pause(200);
+
+    // Scroll so Bravo sits at pane top, then wait (via polling, not a
+    // fixed pause) for the RAF-coalesced scroll handler to mark it active.
+    await browser.execute(() => {
+      const pane = document.querySelector('.preview-pane');
+      const h2 = document.querySelector('#markdown-preview h2');
+      // Add 2px so scrollTop >= offset_bravo (activeHeadingIndex is >=).
+      const delta = h2.getBoundingClientRect().top - pane.getBoundingClientRect().top + 2;
+      pane.scrollTop = pane.scrollTop + delta;
+      pane.dispatchEvent(new Event('scroll'));
+    });
+    await browser.waitUntil(
+      async () => {
+        return browser.execute(() => {
+          const active = document.querySelector('.toc-drawer-item.active');
+          return active && active.textContent === 'Bravo';
+        });
+      },
+      { timeout: 3000, timeoutMsg: 'Active heading did not update to Bravo' }
+    );
+
+    // Scroll further so Charlie reaches pane top.
+    await browser.execute(() => {
+      const pane = document.querySelector('.preview-pane');
+      const h3 = document.querySelector('#markdown-preview h3');
+      const delta = h3.getBoundingClientRect().top - pane.getBoundingClientRect().top + 2;
+      pane.scrollTop = pane.scrollTop + delta;
+      pane.dispatchEvent(new Event('scroll'));
+    });
+    await browser.waitUntil(
+      async () => {
+        return browser.execute(() => {
+          const active = document.querySelector('.toc-drawer-item.active');
+          return active && active.textContent === 'Charlie';
+        });
+      },
+      { timeout: 3000, timeoutMsg: 'Active heading did not update to Charlie' }
+    );
+  });
+
+  it('editor 모드로 전환하면 FAB 와 drawer 가 모두 숨겨진다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // beforeEach already puts us in split mode with drawer closed, so
+    // realign() has had time to mark the FAB visible. Wait for that to
+    // settle before asserting — the beforeEach click fires a 200ms
+    // setTimeout(realign).
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => !document.getElementById('toc-fab').hidden),
+      { timeout: 3000, timeoutMsg: 'FAB did not become visible after split mode' }
+    );
+    const beforeHidden = await browser.execute(() => ({
+      fab: document.getElementById('toc-fab').hidden,
+      drawer: document.getElementById('toc-drawer').hidden,
+    }));
+    expect(beforeHidden.fab).toBe(false);
+
+    const editorBtn = await $('.view-mode-btn[data-mode="editor"]');
+    if (!(await editorBtn.isExisting())) return this.skip();
+    await editorBtn.click();
+    // toc.js polls realign 200ms after view-mode click; poll the DOM
+    // instead of a fixed pause so slow CI doesn't race the transition.
+    await browser.waitUntil(
+      async () => {
+        return browser.execute(() => {
+          const f = document.getElementById('toc-fab');
+          const d = document.getElementById('toc-drawer');
+          return f.hidden && d.hidden;
+        });
+      },
+      { timeout: 3000, timeoutMsg: 'FAB/drawer did not hide after editor mode' }
+    );
+
+    // Cleanup handled by beforeEach in the next test (restores split mode).
   });
 });
