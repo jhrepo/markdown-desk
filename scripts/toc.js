@@ -206,6 +206,7 @@
     function renderDrawer() {
       var list = drawer.querySelector('.toc-drawer-list');
       list.innerHTML = '';
+      state.rows = [];
       if (!state.headings.length) {
         var empty = doc.createElement('div');
         empty.className = 'toc-drawer-empty';
@@ -223,6 +224,7 @@
           scrollHeadingIntoPane(h.element);
         });
         list.appendChild(a);
+        state.rows.push(a);
       });
     }
 
@@ -260,8 +262,10 @@
       scrollRAF = requestAnimationFrame(function () {
         scrollRAF = 0;
         var idx = activeHeadingIndex(previewPane.scrollTop, state.offsets);
-        var rows = drawer.querySelectorAll('.toc-drawer-item');
-        rows.forEach(function (r, i) { r.classList.toggle('active', i === idx); });
+        var rows = state.rows || [];
+        for (var i = 0; i < rows.length; i++) {
+          rows[i].classList.toggle('active', i === idx);
+        }
       });
     });
 

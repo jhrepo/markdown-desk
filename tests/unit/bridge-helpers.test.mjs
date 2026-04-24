@@ -52,6 +52,17 @@ test('shouldRunBackgroundCheck: exact-boundary elapsed triggers check (>=)', () 
   );
 });
 
+test('shouldRunBackgroundCheck: future timestamp does not lock out checks', () => {
+  // Clock skew (manual time change / NTP sync) can land a future value in
+  // localStorage. Without a guard, nowMs - last < 0 < intervalMs always
+  // evaluates false and the user never gets update checks again. Treat
+  // "last is in the future" as "no valid record, re-check".
+  const now = 1_000_000_000_000;
+  const interval = 86_400_000;
+  assert.equal(helpers.shouldRunBackgroundCheck(String(now + interval), now, interval), true);
+  assert.equal(helpers.shouldRunBackgroundCheck(String(now + 1), now, interval), true);
+});
+
 // ---------------- getExportBaseName ----------------
 // Contract: given the active tab's displayed title (or null when no tab
 // is active), return a safe base filename without the .md extension.
