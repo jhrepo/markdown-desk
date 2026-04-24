@@ -22,7 +22,13 @@
     if (rawLastCheck == null) return true;
     var last = parseInt(rawLastCheck, 10);
     if (!isFinite(last) || last <= 0) return true;
-    return (nowMs - last) >= intervalMs;
+    var elapsed = nowMs - last;
+    // Clock skew (manual time change, NTP sync) can land a future value
+    // in storage. Without this guard elapsed is negative forever and the
+    // user stops getting update checks. Treat any future stamp as "no
+    // valid record, re-check now".
+    if (elapsed < 0) return true;
+    return elapsed >= intervalMs;
   }
 
   // Strip a trailing `.md` / `.MD` from the active tab's title and fall
