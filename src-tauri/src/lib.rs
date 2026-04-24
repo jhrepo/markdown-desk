@@ -459,6 +459,66 @@ mod bridge_script_tests {
             "contextmenu handler must preventDefault"
         );
     }
+
+    // Keyboard shortcut contracts — verified via grep because synthetic
+    // KeyboardEvent dispatch does not reach bridge.js's capture listener in
+    // the WebKit/Tauri runtime, so e2e coverage is infeasible for Cmd+S and
+    // Cmd+O. (Cmd+R is covered end-to-end via its localStorage side effect.)
+    // Each shortcut must: match its key, preventDefault, and invoke the
+    // registered Tauri command with the expected argument shape.
+
+    #[test]
+    fn cmd_s_invokes_save_file_with_title_and_content() {
+        let s = bridge_js();
+        // The handler opens with this exact `e.key === 's'` check; if
+        // someone changes the key literal, this pins the regression.
+        assert!(s.contains("e.key === 's'"), "Cmd+S key check missing");
+        assert!(
+            s.contains("invoke('save_file'"),
+            "Cmd+S handler must invoke 'save_file'"
+        );
+        // Payload shape the Rust command expects.
+        assert!(s.contains("title: title"), "save_file payload missing 'title'");
+        assert!(s.contains("content: editor.value"), "save_file payload missing 'content'");
+    }
+
+    #[test]
+    fn cmd_o_invokes_native_open_file() {
+        let s = bridge_js();
+        assert!(s.contains("e.key === 'o'"), "Cmd+O key check missing");
+        assert!(
+            s.contains("invoke('native_open_file')"),
+            "Cmd+O handler must invoke 'native_open_file'"
+        );
+    }
+
+    #[test]
+    fn cmd_r_triggers_hard_reload() {
+        let s = bridge_js();
+        assert!(s.contains("e.key === 'r'"), "Cmd+R key check missing");
+        // hardReload() preserves globalState + dismissed keys then reloads.
+        assert!(s.contains("hardReload()"), "Cmd+R must call hardReload");
+    }
+
+    #[test]
+    fn shortcut_handlers_prevent_default_and_stop_propagation() {
+        let s = bridge_js();
+        // The three shortcut blocks each call preventDefault + stopPropagation
+        // so the browser's default save/open/reload doesn't run. Grep-count
+        // to verify at least three such pairs exist (one per shortcut).
+        let pd_count = s.matches("e.preventDefault()").count();
+        let sp_count = s.matches("e.stopPropagation()").count();
+        assert!(
+            pd_count >= 3,
+            "expected at least 3 preventDefault() calls across shortcut handlers, found {}",
+            pd_count
+        );
+        assert!(
+            sp_count >= 3,
+            "expected at least 3 stopPropagation() calls across shortcut handlers, found {}",
+            sp_count
+        );
+    }
 }
 
 

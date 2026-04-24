@@ -59,10 +59,15 @@ describe('탭 관리', () => {
     const tabsAfter = await $$('#tab-list .tab-item');
     expect(tabsAfter.length).toBe(countBefore + 3);
 
-    // Verify each tab title exists
-    const titles = await Promise.all(
-      tabsAfter.map(t => t.$('.tab-title').then(el => el.getText()))
-    );
+    // Verify each tab title exists. We iterate with for-of because
+    // `tabsAfter.map(...)` returns an array whose Promise elements don't
+    // round-trip cleanly through Promise.all in WDIO 9 (it throws
+    // "object is not iterable").
+    const titles = [];
+    for (const t of tabsAfter) {
+      const titleEl = await t.$('.tab-title');
+      titles.push(await titleEl.getText());
+    }
     expect(titles).toContain('multi-a');
     expect(titles).toContain('multi-b');
     expect(titles).toContain('multi-c');

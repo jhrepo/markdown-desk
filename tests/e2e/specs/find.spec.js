@@ -1,4 +1,27 @@
 describe('Cmd+F 텍스트 찾기', () => {
+  // Earlier runs (and prod) rely on the default upstream README containing
+  // "Welcome" and "Markdown". Across cumulative e2e runs localStorage can
+  // end up holding custom content from earlier specs — explicitly seed a
+  // known document here so every find test searches against the same
+  // baseline, regardless of leftover state.
+  before(async () => {
+    await browser.keys('Escape'); // close any find bar from a prior spec
+    await browser.execute(() => {
+      const ta = document.getElementById('markdown-editor');
+      if (!ta) return;
+      ta.value =
+        '# Welcome\n\n' +
+        'Welcome to Markdown Desk. This document is used by the find spec to ' +
+        'exercise search. Welcome, Welcome, Markdown, Markdown — the word ' +
+        'counts here are fixed so Enter/Shift+Enter navigation has multiple ' +
+        'matches to jump between.\n\n' +
+        '## More Markdown\n\nMarkdown and Welcome appear many times.\n';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // Let the preview re-render before the first Cmd+F fires.
+    await browser.pause(500);
+  });
+
   it('Cmd+F로 검색 바가 표시된다', async () => {
     await browser.keys(['Meta', 'f']);
 
