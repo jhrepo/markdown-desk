@@ -40,8 +40,10 @@ fi
 # window.__bridgeHelpers at call sites.
 sed -i '' 's|</head>|<script src="bridge-helpers.js"></script><script src="bridge.js"></script></head>|' "$FRONTEND_DIR/index.html"
 
-# Inject toc.js as a deferred script so it runs after DOMContentLoaded.
-# Placed before </body> to ensure script.js has already attached handlers.
+# Inject toc.js just before </body>, after the rest of the body has been
+# parsed. This is not literally a `defer` attribute — it relies on DOM
+# parse order so script.js has already attached its handlers by the time
+# toc.js runs. toc.js itself waits on DOMContentLoaded before installing.
 sed -i '' 's|</body>|<script src="toc.js"></script></body>|' "$FRONTEND_DIR/index.html"
 
 echo "Frontend prepared successfully."
