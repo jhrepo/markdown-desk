@@ -1,6 +1,6 @@
 {
   "name": "markdown-desk",
-  "version": "26.4.6",
+  "version": "26.4.7",
   "private": true,
   "description": "Native Markdown editor & previewer built with Tauri",
   "scripts": {
