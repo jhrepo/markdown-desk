@@ -28,41 +28,6 @@ impl WatcherState {
     }
 }
 
-/// Look up the file path for a given tab title (filename or title without .md).
-/// Keys are canonical path strings; this searches by matching the filename component.
-/// Uses 2-pass approach: exact filename match first, then extension-stripped fallback.
-pub fn path_for_title(state: &WatcherState, title: &str) -> Option<PathBuf> {
-    let files = state.files.lock().ok()?;
-    // Pass 0: "dir/filename.md" display name → match parent + filename
-    if let Some((dir, fname)) = title.split_once('/') {
-        for canonical in files.values() {
-            if crate::commands::filename_from_path(canonical) == fname {
-                if let Some(parent) = canonical.parent().and_then(|p| p.file_name()) {
-                    if parent.to_string_lossy() == dir {
-                        return Some(canonical.clone());
-                    }
-                }
-            }
-        }
-    }
-    // Pass 1: exact filename match
-    for canonical in files.values() {
-        if crate::commands::filename_from_path(canonical) == title {
-            return Some(canonical.clone());
-        }
-    }
-    // Pass 2: strip .md/.markdown extension
-    for canonical in files.values() {
-        let fname = crate::commands::filename_from_path(canonical);
-        if let Some(stem) = fname.strip_suffix(".md").or_else(|| fname.strip_suffix(".markdown")) {
-            if stem == title {
-                return Some(canonical.clone());
-            }
-        }
-    }
-    None
-}
-
 /// Compute display name from a file path using a snapshot of watched files.
 /// If another file with the same filename exists, prefix with parent directory.
 pub(crate) fn display_name_from_snapshot(
@@ -159,14 +124,17 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
                             .canonicalize()
                             .unwrap_or_else(|_| event_path.clone());
 
-                        for (_key, watched_path) in watched_files.iter() {
+                        for (key, watched_path) in watched_files.iter() {
                             if canon == *watched_path {
                                 last_emit.store(now, Ordering::Relaxed);
                                 let display = display_name_from_snapshot(watched_path, &watched_files);
-                                dbg_log!("File changed: {}", display);
+                                dbg_log!("File changed: {} ({})", display, key);
                                 if let Ok(content) = std::fs::read_to_string(event_path) {
+                                    // Match key is the canonical path string —
+                                    // bridge.js stores it on `data-path`. The
+                                    // display name is for the tab title only.
                                     crate::commands::update_current_tab(
-                                        &app_handle, &content, &display,
+                                        &app_handle, &content, key,
                                     );
                                 }
                                 return;
@@ -247,57 +215,6 @@ mod tests {
         stop_watching(&state);
         stop_watching(&state);
         assert!(state.files.lock().unwrap().is_empty());
-    }
-
-    // --- path_for_title tests ---
-
-    #[test]
-    fn path_for_title_exact() {
-        let state = WatcherState::new();
-        let path = PathBuf::from("/tmp/test.md");
-        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), path.clone());
-        assert_eq!(path_for_title(&state, "test.md"), Some(path));
-    }
-
-    #[test]
-    fn path_for_title_without_extension() {
-        let state = WatcherState::new();
-        let path = PathBuf::from("/tmp/test.md");
-        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), path.clone());
-        assert_eq!(path_for_title(&state, "test"), Some(path));
-    }
-
-    #[test]
-    fn path_for_title_not_found() {
-        let state = WatcherState::new();
-        assert_eq!(path_for_title(&state, "missing.md"), None);
-    }
-
-    #[test]
-    fn path_for_title_multiple_files() {
-        let state = WatcherState::new();
-        let path_a = PathBuf::from("/tmp/a.md");
-        let path_b = PathBuf::from("/tmp/b.md");
-        state.files.lock().unwrap().insert("/tmp/a.md".to_string(), path_a.clone());
-        state.files.lock().unwrap().insert("/tmp/b.md".to_string(), path_b.clone());
-        assert_eq!(path_for_title(&state, "a.md"), Some(path_a));
-        assert_eq!(path_for_title(&state, "b"), Some(path_b));
-    }
-
-    #[test]
-    fn path_for_title_empty_string() {
-        let state = WatcherState::new();
-        state.files.lock().unwrap().insert("/tmp/test.md".to_string(), PathBuf::from("/tmp/test.md"));
-        assert_eq!(path_for_title(&state, ""), None);
-    }
-
-    #[test]
-    fn path_for_title_case_sensitive() {
-        let state = WatcherState::new();
-        state.files.lock().unwrap().insert("/tmp/Test.md".to_string(), PathBuf::from("/tmp/Test.md"));
-        // 대소문자 구분
-        assert_eq!(path_for_title(&state, "test"), None);
-        assert_eq!(path_for_title(&state, "Test"), Some(PathBuf::from("/tmp/Test.md")));
     }
 
     // --- now_millis tests ---
@@ -410,81 +327,6 @@ mod tests {
     fn should_emit_clock_backward() {
         // 시계 역행 시 panic 대신 false 반환 (saturating_sub)
         assert!(!should_emit(100, 500, 300));
-    }
-
-    #[test]
-    fn path_for_title_prefers_exact_filename() {
-        let state = WatcherState::new();
-        let path_exact = PathBuf::from("/tmp/README");
-        let path_md = PathBuf::from("/tmp/README.md");
-        state.files.lock().unwrap().insert("/tmp/README".to_string(), path_exact.clone());
-        state.files.lock().unwrap().insert("/tmp/README.md".to_string(), path_md.clone());
-        // "README" matches filename "README" exactly
-        assert_eq!(path_for_title(&state, "README"), Some(path_exact));
-    }
-
-    #[test]
-    fn path_for_title_fallback_strips_md() {
-        let state = WatcherState::new();
-        let path = PathBuf::from("/tmp/notes.md");
-        state.files.lock().unwrap().insert("/tmp/notes.md".to_string(), path.clone());
-        // "notes" should find "notes.md" via fallback
-        assert_eq!(path_for_title(&state, "notes"), Some(path));
-        // "notes.txt" should not match
-        assert_eq!(path_for_title(&state, "notes.txt"), None);
-    }
-
-    #[test]
-    fn path_for_title_unicode_filename() {
-        let state = WatcherState::new();
-        let path = PathBuf::from("/tmp/메모.md");
-        state.files.lock().unwrap().insert("/tmp/메모.md".to_string(), path.clone());
-        assert_eq!(path_for_title(&state, "메모"), Some(path));
-    }
-
-    #[test]
-    fn path_for_title_display_name_with_dir_prefix() {
-        // display_name_for_file produces "b/notes.md" for conflict; path_for_title must resolve it
-        let state = WatcherState::new();
-        let path_a = PathBuf::from("/tmp/a/notes.md");
-        let path_b = PathBuf::from("/tmp/b/notes.md");
-        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path_a.clone());
-        state.files.lock().unwrap().insert("/tmp/b/notes.md".to_string(), path_b.clone());
-        assert_eq!(path_for_title(&state, "b/notes.md"), Some(path_b));
-        assert_eq!(path_for_title(&state, "a/notes.md"), Some(path_a));
-    }
-
-    #[test]
-    fn path_for_title_display_name_nonexistent_dir() {
-        let state = WatcherState::new();
-        let path = PathBuf::from("/tmp/a/notes.md");
-        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path.clone());
-        // "c/notes.md" has correct filename but wrong dir prefix
-        assert_eq!(path_for_title(&state, "c/notes.md"), None);
-    }
-
-    #[test]
-    fn path_for_title_plain_filename_still_works_with_conflicts() {
-        // Even when conflicts exist, plain "notes.md" should still return one of them
-        let state = WatcherState::new();
-        let path_a = PathBuf::from("/tmp/a/notes.md");
-        let path_b = PathBuf::from("/tmp/b/notes.md");
-        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path_a.clone());
-        state.files.lock().unwrap().insert("/tmp/b/notes.md".to_string(), path_b.clone());
-        let result = path_for_title(&state, "notes.md");
-        assert!(result == Some(path_a) || result == Some(path_b));
-    }
-
-    #[test]
-    fn path_for_title_same_filename_different_dirs() {
-        let state = WatcherState::new();
-        let path_a = PathBuf::from("/tmp/a/notes.md");
-        let path_b = PathBuf::from("/tmp/b/notes.md");
-        state.files.lock().unwrap().insert("/tmp/a/notes.md".to_string(), path_a.clone());
-        state.files.lock().unwrap().insert("/tmp/b/notes.md".to_string(), path_b.clone());
-        // Both have filename "notes.md"; path_for_title returns one of them (non-deterministic)
-        let result = path_for_title(&state, "notes.md");
-        assert!(result == Some(path_a) || result == Some(path_b));
     }
 
     #[test]

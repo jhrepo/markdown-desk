@@ -1,7 +1,119 @@
 // bridge.js — Tauri ↔ Web app bridge
 // Injected into <head> via prepare-frontend.sh (runs before original scripts)
 (function() {
+
+  // Sidecar map from tab id → canonical file path.
+  // Tab title alone is ambiguous when two open files share the same basename
+  // (e.g. ~/work/README.md + ~/personal/README.md), so the watcher's updates
+  // need a stable per-tab key. The map is persisted so it survives reloads.
+  var BRIDGE_TAB_PATHS_KEY = 'bridge-tab-paths';
+  function bridgeLoadTabPaths() {
+    try { return JSON.parse(localStorage.getItem(BRIDGE_TAB_PATHS_KEY) || '{}') || {}; }
+    catch (_) { return {}; }
+  }
+  function bridgeSaveTabPaths(m) {
+    try { localStorage.setItem(BRIDGE_TAB_PATHS_KEY, JSON.stringify(m)); } catch (_) {}
+  }
+
+  // Drop entries whose tab id no longer appears in the host app's tab list.
+  // Without this, every closed tab leaks an entry forever — long-lived
+  // sessions (esp. workflows that auto-generate temp .md files) can push the
+  // map past localStorage's quota, at which point bridgeSaveTabPaths fails
+  // silently and the watcher loses path matching for *all* tabs. Same failure
+  // class as the original title-vs-path bug (silent + scoped to a known set).
+  function bridgeGcTabPaths(map) {
+    var liveIds;
+    try {
+      liveIds = JSON.parse(localStorage.getItem('markdownViewerTabs') || '[]')
+        .map(function(t) { return t && t.id; })
+        .filter(Boolean);
+    } catch (_) { return false; }
+    var liveSet = Object.create(null);
+    liveIds.forEach(function(id) { liveSet[id] = 1; });
+    var changed = false;
+    Object.keys(map).forEach(function(id) {
+      if (!liveSet[id]) { delete map[id]; changed = true; }
+    });
+    return changed;
+  }
+
   document.addEventListener('DOMContentLoaded', function() {
+    window.__bridgeTabPaths = bridgeLoadTabPaths();
+    // One-shot GC on startup: collapse any drift that accumulated before this
+    // version (or that closeTabsByIds missed if the host re-rendered before
+    // we could observe the click).
+    if (bridgeGcTabPaths(window.__bridgeTabPaths)) {
+      bridgeSaveTabPaths(window.__bridgeTabPaths);
+    }
+    // Pushed by Rust js_new_tab right before dispatching each synthetic
+    // file-input change. A FIFO queue (not a single variable) is required so
+    // a multi-file open — N rapid evals followed by N MutationObserver
+    // callbacks possibly batched into one — keeps each tab paired with the
+    // path it was opened with. A scalar would be overwritten by the last
+    // push and silently swap paths between tabs.
+    window.__bridgeNextPaths = window.__bridgeNextPaths || [];
+
+    function bridgeStampTabPath(item) {
+      if (!item || !item.classList || !item.classList.contains('tab-item')) return;
+      var id = item.getAttribute('data-tab-id');
+      // Prefer the per-tab map (covers tab restore + later re-renders); fall
+      // back to the queue only on the very first stamp of a new tab so a
+      // restamp of an existing tab can't accidentally drain the queue.
+      var existing = id ? window.__bridgeTabPaths[id] : null;
+      var path = existing || (window.__bridgeNextPaths.length ? window.__bridgeNextPaths.shift() : null);
+      if (!path) return;
+      item.setAttribute('data-path', path);
+      if (id && !existing) {
+        window.__bridgeTabPaths[id] = path;
+        bridgeSaveTabPaths(window.__bridgeTabPaths);
+      }
+    }
+
+    function bridgeRestampAllTabs() {
+      var items = document.querySelectorAll('#tab-list .tab-item');
+      items.forEach(bridgeStampTabPath);
+    }
+
+    // Re-apply data-path on an existing tab using only the sidecar map.
+    // Used when an attribute-mutation observer reports a data-tab-id change
+    // (in-place id rename rather than node destroy/recreate). The queue
+    // must NOT be consumed here — id rename ≠ new file open, so taking
+    // from the queue would mis-pair a path with the wrong tab.
+    function bridgeRestampFromMap(item) {
+      if (!item || !item.classList || !item.classList.contains('tab-item')) return;
+      var id = item.getAttribute('data-tab-id');
+      var existing = id ? window.__bridgeTabPaths[id] : null;
+      if (existing) item.setAttribute('data-path', existing);
+    }
+
+    (function installTabPathObserver() {
+      var tabList = document.getElementById('tab-list');
+      if (!tabList) return;
+      var mo = new MutationObserver(function(records) {
+        records.forEach(function(rec) {
+          if (rec.type === 'childList') {
+            Array.from(rec.addedNodes).forEach(function(node) {
+              if (node && node.nodeType === 1) bridgeStampTabPath(node);
+            });
+          } else if (rec.type === 'attributes' && rec.target && rec.target.nodeType === 1) {
+            // Defensive: today the host re-renders by destroying + recreating
+            // tab nodes, but a future switch to in-place data-tab-id rename
+            // would silently lose data-path without this. Cheap insurance —
+            // attributeFilter scopes us to data-tab-id, and our own
+            // setAttribute('data-path', …) won't re-trigger the observer.
+            bridgeRestampFromMap(rec.target);
+          }
+        });
+      });
+      mo.observe(tabList, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-tab-id'],
+      });
+      bridgeRestampAllTabs();
+    })();
+
     // Override Reset buttons to hard reload
     var resetBtn = document.getElementById('tab-reset-btn');
     if (resetBtn) {
@@ -36,9 +148,37 @@
     } catch (e) { var watchedPaths = []; }
     if (watchedPaths.length && window.__TAURI_INTERNALS__) {
       watchedPaths.forEach(function(p) {
-        window.__TAURI_INTERNALS__.invoke('restore_watcher', { path: p }).catch(function(e) {
-          console.warn('[bridge] Failed to restore watcher:', p, e);
-        });
+        window.__TAURI_INTERNALS__.invoke('restore_watcher', { path: p })
+          .then(function(canonical) {
+            if (!canonical || canonical === p) return;
+            // Realign the sidecar map and any tab DOM whose data-path was
+            // stamped from the pre-canonical input (e.g. `/var/…` vs
+            // `/private/var/…` on macOS). Watcher updates use canonical, so
+            // matching has to use canonical too.
+            var changed = false;
+            Object.keys(window.__bridgeTabPaths).forEach(function(id) {
+              if (window.__bridgeTabPaths[id] === p) {
+                window.__bridgeTabPaths[id] = canonical;
+                changed = true;
+                var el = document.querySelector('[data-tab-id="' + id + '"]');
+                if (el) el.setAttribute('data-path', canonical);
+              }
+            });
+            // Also update the persisted watched-paths list so the next
+            // startup skips this realignment entirely.
+            try {
+              var arr = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
+              var idx = arr.indexOf(p);
+              if (idx >= 0) {
+                arr[idx] = canonical;
+                localStorage.setItem('markdown-desk-watched-paths', JSON.stringify(arr));
+              }
+            } catch (_) {}
+            if (changed) bridgeSaveTabPaths(window.__bridgeTabPaths);
+          })
+          .catch(function(e) {
+            console.warn('[bridge] Failed to restore watcher:', p, e);
+          });
       });
     }
 
@@ -48,10 +188,10 @@
     function onTabClick() {
       if (!window.__TAURI_INTERNALS__) return;
       setTimeout(function() {
-        var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
-        var title = activeEl ? activeEl.textContent.trim() : '';
-        if (title) {
-          window.__TAURI_INTERNALS__.invoke('refresh_active_tab', { title: title });
+        var activeEl = document.querySelector('#tab-list .tab-item.active');
+        var path = activeEl ? activeEl.getAttribute('data-path') : '';
+        if (path) {
+          window.__TAURI_INTERNALS__.invoke('refresh_active_tab', { path: path });
         }
       }, 50);
     }
@@ -638,12 +778,12 @@
       e.preventDefault();
       e.stopPropagation();
       if (window.__TAURI_INTERNALS__) {
-        var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
-        var title = activeEl ? activeEl.textContent.trim() : '';
+        var activeEl = document.querySelector('#tab-list .tab-item.active');
+        var path = activeEl ? activeEl.getAttribute('data-path') : '';
         var editor = document.getElementById('markdown-editor');
-        if (title && editor) {
+        if (path && editor) {
           window.__TAURI_INTERNALS__.invoke('save_file', {
-            title: title,
+            path: path,
             content: editor.value
           });
         }
@@ -703,6 +843,19 @@
         var delBtn = listEl.querySelector(sel);
         if (delBtn) delBtn.click();
       });
+      // Drop closed tabs from the bridge sidecar map. The startup GC catches
+      // any we miss here (e.g. tab closed via host UI we don't observe), but
+      // doing it eagerly keeps localStorage compact during long sessions.
+      if (window.__bridgeTabPaths) {
+        var changed = false;
+        ids.forEach(function(id) {
+          if (window.__bridgeTabPaths[id]) {
+            delete window.__bridgeTabPaths[id];
+            changed = true;
+          }
+        });
+        if (changed) bridgeSaveTabPaths(window.__bridgeTabPaths);
+      }
     }
 
     function buildItem(label, ids, listEl) {

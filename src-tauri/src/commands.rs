@@ -50,8 +50,9 @@ pub fn open_file_and_watch(app: &tauri::AppHandle) {
             // Phase 2: compute display names (all files now in state) and open tabs
             for (path, content) in prepared {
                 let display = display_name_for_file(&path, &state);
+                let canonical = canonical_or_self(&path);
                 dbg_log!("[open] {} bytes from {}", content.len(), display);
-                open_in_new_tab(&app_handle, &content, &display);
+                open_in_new_tab(&app_handle, &content, &display, &canonical.to_string_lossy());
             }
         });
 }
@@ -64,7 +65,8 @@ pub fn open_file_directly(app: &tauri::AppHandle, path: std::path::PathBuf) {
         Ok((content, _filename)) => {
             let state = app.state::<WatcherState>();
             let display = display_name_for_file(&path, &state);
-            open_in_new_tab(app, &content, &display);
+            let canonical = canonical_or_self(&path);
+            open_in_new_tab(app, &content, &display, &canonical.to_string_lossy());
 
             match crate::watcher::add_file(app, &state, path.clone()) {
                 Ok(_) => {
@@ -102,6 +104,13 @@ pub(crate) fn filename_from_path(path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// Canonicalize a path, falling back to the original if the FS call fails
+/// (e.g. permission, transient I/O). Used everywhere we persist or compare
+/// paths so /var/… vs /private/var/… aliases collapse to a single key.
+pub(crate) fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Generate a display name for a file, adding parent directory prefix if
 /// another file with the same filename is already open.
 pub(crate) fn display_name_for_file(
@@ -114,7 +123,7 @@ pub(crate) fn display_name_for_file(
         Err(_) => return filename,
     };
     // Compare using canonical path to avoid false conflicts from non-canonical input
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canon = canonical_or_self(path);
     let has_conflict = files.values().any(|existing| {
         filename_from_path(existing) == filename && *existing != canon
     });
@@ -128,9 +137,20 @@ pub(crate) fn display_name_for_file(
 }
 
 /// Generate JS to open content in a new tab via synthetic file-input change event.
-pub(crate) fn js_new_tab(content: &str, filename: &str) -> String {
+/// `path` is enqueued on `window.__bridgeNextPaths` so bridge.js can stamp it
+/// as `data-path` on the freshly created tab item — the watcher uses that
+/// attribute (not the tab title) to find which tab should receive updates.
+///
+/// A FIFO queue (vs. a single scalar) is required for batch opens: the OS
+/// dialog hands us N files at once, Rust loops `eval(js_new_tab)` rapidly,
+/// and the webview may coalesce multiple childList records into one
+/// MutationObserver callback. With a scalar, the last push would overwrite
+/// the earlier one and tabs would silently swap their paths. With a queue,
+/// each tab pulls the path it was opened with.
+pub(crate) fn js_new_tab(content: &str, filename: &str, path: &str) -> String {
     let js_content = escape_js(content);
     let js_filename = escape_js(filename);
+    let js_path = escape_js(path);
 
     format!(
         r#"(function() {{
@@ -141,6 +161,7 @@ pub(crate) fn js_new_tab(content: &str, filename: &str) -> String {
             var dt = new DataTransfer();
             dt.items.add(file);
             fileInput.files = dt.files;
+            (window.__bridgeNextPaths = window.__bridgeNextPaths || []).push(`{}`);
             fileInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
             setTimeout(function() {{
                 var editor = document.getElementById('markdown-editor');
@@ -150,23 +171,27 @@ pub(crate) fn js_new_tab(content: &str, filename: &str) -> String {
                 window.scrollTo(0, 0);
             }}, 100);
         }})()"#,
-        js_content, js_filename
+        js_content, js_filename, js_path
     )
 }
 
-/// Generate JS to update the active tab if it matches the given filename.
-/// Checks the DOM tab bar for the active tab's title to determine if it matches.
-pub(crate) fn js_update_tab(content: &str, filename: &str) -> String {
+/// Generate JS to update the active tab if its `data-path` attribute matches
+/// the canonical path we received from the watcher.
+///
+/// Path-based matching survives same-basename conflicts (e.g. multiple
+/// `README.md` open from different directories), where the older title-based
+/// match silently failed because the tab title and the watcher-side display
+/// name diverged once a conflict was introduced.
+pub(crate) fn js_update_tab(content: &str, path: &str) -> String {
     let js_content = escape_js(content);
-    let js_filename = escape_js(filename);
+    let js_path = escape_js(path);
 
     format!(
         r#"(function() {{
-            var filename = `{}`;
-            var titleMatch = filename.replace(/\.md$/i, '');
-            var activeEl = document.querySelector('#tab-list .tab-item.active .tab-title');
-            var activeTitle = activeEl ? activeEl.textContent.trim() : '';
-            if (activeTitle !== titleMatch && activeTitle !== filename) return;
+            var path = `{}`;
+            var activeEl = document.querySelector('#tab-list .tab-item.active');
+            if (!activeEl) return;
+            if (activeEl.getAttribute('data-path') !== path) return;
             var editor = document.getElementById('markdown-editor');
             if (editor) {{
                 var newContent = `{}`;
@@ -181,26 +206,27 @@ pub(crate) fn js_update_tab(content: &str, filename: &str) -> String {
                 }}, 100);
             }}
         }})()"#,
-        js_filename, js_content
+        js_path, js_content
     )
 }
 
-fn open_in_new_tab(app: &tauri::AppHandle, content: &str, filename: &str) {
+fn open_in_new_tab(app: &tauri::AppHandle, content: &str, filename: &str, path: &str) {
     if let Some(ww) = app.get_webview_window("main") {
-        let js = js_new_tab(content, filename);
+        let js = js_new_tab(content, filename, path);
         match ww.eval(&js) {
-            Ok(_) => dbg_log!("[tab] New tab triggered: {}", filename),
+            Ok(_) => dbg_log!("[tab] New tab triggered: {} ({})", filename, path),
             Err(e) => dbg_log!("[tab] Failed: {}", e),
         }
     }
 }
 
-/// Update content in matching tabs (used by file watcher for live reload)
-pub fn update_current_tab(app: &tauri::AppHandle, content: &str, filename: &str) {
+/// Update content in the active tab if its data-path matches the given
+/// canonical path. Used by the file watcher and tab-switch refresh.
+pub fn update_current_tab(app: &tauri::AppHandle, content: &str, path: &str) {
     if let Some(ww) = app.get_webview_window("main") {
-        let js = js_update_tab(content, filename);
+        let js = js_update_tab(content, path);
         match ww.eval(&js) {
-            Ok(_) => dbg_log!("[update] OK: {}", filename),
+            Ok(_) => dbg_log!("[update] OK: {}", path),
             Err(e) => dbg_log!("[update] Failed: {}", e),
         }
     }
@@ -217,9 +243,15 @@ pub(crate) fn js_add_watched_path(path: &str) -> String {
 
 fn persist_watched_path(app: &tauri::AppHandle, path: &std::path::Path) {
     if let Some(ww) = app.get_webview_window("main") {
-        let js = js_add_watched_path(&path.to_string_lossy());
+        // Always persist the canonical form. Bridge stamps `data-path` from
+        // the same canonical (via js_new_tab), and the watcher emits updates
+        // keyed by canonical — keeping localStorage in lockstep means restore
+        // on app restart doesn't fall back to a symlinked alias that would
+        // miss the data-path match (e.g. /var/… vs /private/var/… on macOS).
+        let canonical = canonical_or_self(path);
+        let js = js_add_watched_path(&canonical.to_string_lossy());
         match ww.eval(&js) {
-            Ok(_) => dbg_log!("[persist] Watched path stored: {}", path.display()),
+            Ok(_) => dbg_log!("[persist] Watched path stored: {}", canonical.display()),
             Err(e) => dbg_log!("[persist] Failed to store watched path: {}", e),
         }
     }
@@ -231,41 +263,58 @@ pub(crate) fn validate_restore_path(path: &str) -> Option<std::path::PathBuf> {
     if path_buf.exists() { Some(path_buf) } else { None }
 }
 
-/// Tauri IPC command — called from bridge.js on app restart to restore file watching.
+/// Tauri IPC command — called from bridge.js on app restart to restore file
+/// watching. Returns the canonical path string so bridge.js can re-sync any
+/// `data-path` attribute or sidecar map entry that was persisted before
+/// canonicalization (e.g. on macOS where `/var/…` aliases `/private/var/…`).
 #[tauri::command]
-pub fn restore_watcher(app: tauri::AppHandle, path: String) {
-    let Some(path_buf) = validate_restore_path(&path) else {
-        dbg_log!("[restore] File no longer exists: {}", path);
-        return;
-    };
+pub fn restore_watcher(app: tauri::AppHandle, path: String) -> Option<String> {
+    let path_buf = validate_restore_path(&path)?;
+    let canonical = canonical_or_self(&path_buf);
     let state = app.state::<WatcherState>();
     match crate::watcher::add_file(&app, &state, path_buf) {
-        Ok(_) => dbg_log!("[restore] Watcher restored for: {}", path),
-        Err(e) => dbg_log!("[restore] Watcher restore failed: {}", e),
+        Ok(_) => {
+            dbg_log!("[restore] Watcher restored for: {}", canonical.display());
+            Some(canonical.to_string_lossy().to_string())
+        }
+        Err(e) => {
+            dbg_log!("[restore] Watcher restore failed: {}", e);
+            None
+        }
     }
 }
 
-/// Resolve a tab title to its file content. Returns (content, filename) on success.
-pub(crate) fn resolve_and_read_tab(
+/// Look up a path string in the WatcherState files map and return the
+/// canonical PathBuf if it is currently being watched. Used as a guardrail
+/// for path-based IPC commands so the webview can't direct us at arbitrary
+/// files outside the user's open set.
+pub(crate) fn resolve_watched_path(
     state: &WatcherState,
-    title: &str,
-) -> Option<Result<(String, String), String>> {
-    let path = crate::watcher::path_for_title(state, title)?;
-    Some(read_and_prepare_file(&path))
+    path: &str,
+) -> Option<std::path::PathBuf> {
+    state
+        .files
+        .lock()
+        .ok()
+        .and_then(|files| files.get(path).cloned())
 }
 
 /// Tauri IPC command — called from bridge.js on tab switch.
-/// Reads the file matching the given tab title and updates the tab.
+/// Re-reads the file at the given canonical path and pushes the latest disk
+/// content into the active tab editor.
 #[tauri::command]
-pub fn refresh_active_tab(app: tauri::AppHandle, title: String) {
+pub fn refresh_active_tab(app: tauri::AppHandle, path: String) {
     let state = app.state::<WatcherState>();
-    match resolve_and_read_tab(&state, &title) {
-        Some(Ok((content, filename))) => {
-            update_current_tab(&app, &content, &filename);
-            dbg_log!("[refresh] Tab refreshed: {}", filename);
+    let Some(canonical) = resolve_watched_path(&state, &path) else {
+        dbg_log!("[refresh] Path not in watched set: {}", path);
+        return;
+    };
+    match std::fs::read_to_string(&canonical) {
+        Ok(content) => {
+            update_current_tab(&app, &content, &path);
+            dbg_log!("[refresh] Tab refreshed: {}", path);
         }
-        Some(Err(e)) => dbg_log!("[refresh] {}", e),
-        None => {}
+        Err(e) => dbg_log!("[refresh] Read error: {} ({})", e, path),
     }
 }
 
@@ -274,24 +323,17 @@ pub(crate) fn save_content_to_file(path: &std::path::Path, content: &str) -> Res
     std::fs::write(path, content).map_err(|e| format!("Save error: {}", e))
 }
 
-/// Resolve a tab title and save content to the corresponding file.
-pub(crate) fn resolve_and_save_tab(
-    state: &WatcherState,
-    title: &str,
-    content: &str,
-) -> Result<std::path::PathBuf, String> {
-    let path = crate::watcher::path_for_title(state, title)
-        .ok_or_else(|| format!("No watched file for tab: {}", title))?;
-    save_content_to_file(&path, content)?;
-    Ok(path)
-}
-
-/// Tauri IPC command — save editor content to the file matching the active tab.
+/// Tauri IPC command — save editor content to the file at the given canonical path.
+/// Path must be in the watched set; otherwise the call is a no-op.
 #[tauri::command]
-pub fn save_file(app: tauri::AppHandle, title: String, content: String) {
+pub fn save_file(app: tauri::AppHandle, path: String, content: String) {
     let state = app.state::<WatcherState>();
-    match resolve_and_save_tab(&state, &title, &content) {
-        Ok(path) => dbg_log!("[save] Saved: {}", path.display()),
+    let Some(canonical) = resolve_watched_path(&state, &path) else {
+        dbg_log!("[save] Path not in watched set: {}", path);
+        return;
+    };
+    match save_content_to_file(&canonical, &content) {
+        Ok(_) => dbg_log!("[save] Saved: {}", canonical.display()),
         Err(e) => dbg_log!("[save] {}", e),
     }
 }
@@ -408,12 +450,42 @@ pub(crate) fn escape_js(s: &str) -> String {
         .replace("${", "\\${")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+        // Defensive: harmless inside a JS template literal (current sole use),
+        // but cheap insurance against a future caller splicing the result into
+        // a <script> body where `</script>` would terminate the tag early.
+        .replace("</", "<\\/")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    // --- canonical_or_self tests ---
+
+    #[test]
+    fn canonical_or_self_existing_file_resolves_symlinks() {
+        let dir = std::env::temp_dir().join("md_desk_test_canon");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("real.md");
+        std::fs::write(&path, "x").unwrap();
+        // canonicalize() collapses /var/… → /private/var/… on macOS, so the
+        // returned path may differ from input, but it must point at the same
+        // file; round-tripping through canonical_or_self should be idempotent.
+        let canonical = canonical_or_self(&path);
+        assert!(canonical.exists());
+        assert_eq!(canonical_or_self(&canonical), canonical);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn canonical_or_self_nonexistent_falls_back_to_input() {
+        // canonicalize() fails for missing paths. We must keep the input so
+        // callers can still log/store something rather than crash.
+        let bogus = Path::new("/nonexistent_dir_canon_99999/missing.md");
+        assert_eq!(canonical_or_self(bogus), bogus.to_path_buf());
+    }
 
     // --- escape_js tests ---
 
@@ -498,7 +570,7 @@ mod tests {
 
     #[test]
     fn js_new_tab_contains_content_and_filename() {
-        let js = js_new_tab("# Hello", "test.md");
+        let js = js_new_tab("# Hello", "test.md", "/tmp/test.md");
         assert!(js.contains("# Hello"));
         assert!(js.contains("test.md"));
         assert!(js.contains("file-input"));
@@ -506,22 +578,33 @@ mod tests {
     }
 
     #[test]
+    fn js_new_tab_pushes_path_onto_queue() {
+        // Multi-file open: Rust evals js_new_tab N times back-to-back. The
+        // queue keeps each path paired with its tab; a single scalar would be
+        // overwritten by the last push and swap paths between tabs.
+        let js = js_new_tab("c", "f.md", "/tmp/file.md");
+        assert!(js.contains("(window.__bridgeNextPaths = window.__bridgeNextPaths || []).push("));
+        // Sanity: the old single-scalar assignment must not regress back in.
+        assert!(!js.contains("window.__bridgeNextPath = `"));
+    }
+
+    #[test]
     fn js_new_tab_escapes_content() {
-        let js = js_new_tab("has `backtick` and ${var}", "file.md");
+        let js = js_new_tab("has `backtick` and ${var}", "file.md", "/tmp/file.md");
         assert!(js.contains("\\`backtick\\`"));
         assert!(js.contains("\\${var}"));
     }
 
     #[test]
     fn js_new_tab_empty_content() {
-        let js = js_new_tab("", "empty.md");
+        let js = js_new_tab("", "empty.md", "/tmp/empty.md");
         assert!(js.contains("empty.md"));
         assert!(js.contains("file-input"));
     }
 
     #[test]
     fn js_new_tab_scrolls_to_top() {
-        let js = js_new_tab("content", "f.md");
+        let js = js_new_tab("content", "f.md", "/tmp/f.md");
         assert!(js.contains("scrollTop = 0"));
         assert!(js.contains("window.scrollTo(0, 0)"));
     }
@@ -530,82 +613,77 @@ mod tests {
 
     #[test]
     fn js_update_tab_contains_content() {
-        let js = js_update_tab("# Updated", "test.md");
+        let js = js_update_tab("# Updated", "/tmp/test.md");
         assert!(js.contains("# Updated"));
         assert!(js.contains("markdown-editor"));
     }
 
     #[test]
     fn js_update_tab_escapes_content() {
-        let js = js_update_tab("code `block` ${x}", "test.md");
+        let js = js_update_tab("code `block` ${x}", "/tmp/test.md");
         assert!(js.contains("\\`block\\`"));
         assert!(js.contains("\\${x}"));
     }
 
     #[test]
     fn js_update_tab_dispatches_input_event() {
-        let js = js_update_tab("content", "test.md");
+        let js = js_update_tab("content", "/tmp/test.md");
         assert!(js.contains("dispatchEvent"));
         assert!(js.contains("'input'"));
     }
 
     #[test]
     fn js_update_tab_scrolls_to_top() {
-        let js = js_update_tab("content", "test.md");
+        let js = js_update_tab("content", "/tmp/test.md");
         assert!(js.contains("scrollTop = 0"));
         assert!(js.contains("window.scrollTo(0, 0)"));
     }
 
     #[test]
     fn js_update_tab_empty() {
-        let js = js_update_tab("", "empty.md");
-        assert!(js.contains("empty.md"));
+        let js = js_update_tab("", "/tmp/empty.md");
+        assert!(js.contains("/tmp/empty.md"));
         assert!(js.contains("markdown-editor"));
     }
 
     #[test]
-    fn js_update_tab_checks_active_tab_title() {
-        let js = js_update_tab("content", "test.md");
-        // Reads active tab title from DOM
-        assert!(js.contains(".tab-item.active .tab-title"));
-        assert!(js.contains("activeTitle"));
+    fn js_update_tab_matches_by_data_path() {
+        let js = js_update_tab("content", "/tmp/test.md");
+        // Reads active tab's data-path attribute (set by bridge.js).
+        assert!(js.contains(".tab-item.active"));
+        assert!(js.contains("getAttribute('data-path')"));
     }
 
     #[test]
     fn js_update_tab_skips_non_matching_tab() {
-        let js = js_update_tab("content", "test.md");
-        // Returns early if active tab doesn't match
-        assert!(js.contains("activeTitle !== titleMatch"));
-        assert!(js.contains("activeTitle !== filename"));
+        let js = js_update_tab("content", "/tmp/test.md");
+        // Returns early if active tab's data-path doesn't match.
+        assert!(js.contains("!== path"));
         assert!(js.contains("return"));
     }
 
     #[test]
-    fn js_update_tab_matches_without_extension() {
-        let js = js_update_tab("content", "test.md");
-        assert!(js.contains("replace(/\\.md$/i, '')"));
+    fn js_update_tab_path_before_content() {
+        // Path token must appear before the (much larger) content blob so a
+        // bug in escape_js can't allow the content to silently shadow path.
+        let js = js_update_tab("UNIQUE_CONTENT", "/UNIQUE_PATH/x.md");
+        let p = js.find("/UNIQUE_PATH/x.md").unwrap();
+        let c = js.find("UNIQUE_CONTENT").unwrap();
+        assert!(p < c);
     }
 
     #[test]
-    fn js_update_tab_contains_filename() {
-        let js = js_update_tab("content", "readme.md");
-        assert!(js.contains("readme.md"));
+    fn js_update_tab_contains_path() {
+        let js = js_update_tab("content", "/tmp/readme.md");
+        assert!(js.contains("/tmp/readme.md"));
     }
 
     #[test]
-    fn js_update_tab_escapes_filename() {
-        let js = js_update_tab("content", "file`name.md");
+    fn js_update_tab_escapes_path() {
+        let js = js_update_tab("content", "/tmp/file`name.md");
         assert!(js.contains("file\\`name.md"));
     }
 
-    #[test]
-    fn js_update_tab_filename_before_content() {
-        // filename is set first (var filename), then content (editor.value)
-        let js = js_update_tab("UNIQUE_CONTENT", "UNIQUE_FILE.md");
-        let fname_pos = js.find("UNIQUE_FILE.md").unwrap();
-        let content_pos = js.find("UNIQUE_CONTENT").unwrap();
-        assert!(fname_pos < content_pos);
-    }
 
     // --- js_add_watched_path tests ---
 
@@ -720,6 +798,17 @@ mod tests {
     }
 
     #[test]
+    fn escape_js_close_script_tag_is_neutralized() {
+        // Defensive: today escape_js output is only used inside JS template
+        // literals (where </script> is harmless), but if a future caller ever
+        // splices the result into a <script>…</script> body, an embedded
+        // </script> would terminate the script tag early. Splitting the slash
+        // costs nothing inside a template literal and removes that footgun.
+        assert_eq!(escape_js("</script>"), "<\\/script>");
+        assert_eq!(escape_js("a</SCRIPT>b"), "a<\\/SCRIPT>b");
+    }
+
+    #[test]
     fn escape_js_crlf_escaped() {
         assert_eq!(escape_js("a\r\nb"), "a\\r\\nb");
     }
@@ -762,7 +851,7 @@ mod tests {
 
     #[test]
     fn js_new_tab_is_iife() {
-        let js = js_new_tab("x", "f.md");
+        let js = js_new_tab("x", "f.md", "/tmp/f.md");
         let trimmed = js.trim();
         assert!(trimmed.starts_with("(function()"));
         assert!(trimmed.ends_with("()"));
@@ -771,26 +860,26 @@ mod tests {
     #[test]
     fn js_new_tab_large_content() {
         let large = "# heading\n".repeat(10_000);
-        let js = js_new_tab(&large, "large.md");
+        let js = js_new_tab(&large, "large.md", "/tmp/large.md");
         assert!(js.contains("large.md"));
         assert!(js.len() > large.len());
     }
 
     #[test]
     fn js_new_tab_special_filename() {
-        let js = js_new_tab("content", "file`name${x}.md");
+        let js = js_new_tab("content", "file`name${x}.md", "/tmp/file.md");
         assert!(js.contains("file\\`name\\${x}.md"));
     }
 
     #[test]
     fn js_new_tab_sets_file_type() {
-        let js = js_new_tab("content", "f.md");
+        let js = js_new_tab("content", "f.md", "/tmp/f.md");
         assert!(js.contains("text/markdown"));
     }
 
     #[test]
     fn js_update_tab_skips_when_content_unchanged() {
-        let js = js_update_tab("content", "test.md");
+        let js = js_update_tab("content", "/tmp/test.md");
         assert!(js.contains("if (editor.value === newContent) return"));
     }
 
@@ -798,7 +887,7 @@ mod tests {
 
     #[test]
     fn js_update_tab_is_iife() {
-        let js = js_update_tab("x", "x.md");
+        let js = js_update_tab("x", "/tmp/x.md");
         let trimmed = js.trim();
         assert!(trimmed.starts_with("(function()"));
         assert!(trimmed.ends_with("()"));
@@ -807,14 +896,14 @@ mod tests {
     #[test]
     fn js_update_tab_large_content() {
         let large = "line\n".repeat(50_000);
-        let js = js_update_tab(&large, "large.md");
-        assert!(js.contains("large.md"));
+        let js = js_update_tab(&large, "/tmp/large.md");
+        assert!(js.contains("/tmp/large.md"));
         assert!(js.len() > large.len());
     }
 
     #[test]
     fn js_update_tab_unicode_content() {
-        let js = js_update_tab("# 한글 제목\n\n본문입니다", "메모.md");
+        let js = js_update_tab("# 한글 제목\n\n본문입니다", "/tmp/메모.md");
         assert!(js.contains("한글 제목"));
         assert!(js.contains("본문입니다"));
     }
@@ -823,8 +912,8 @@ mod tests {
 
     #[test]
     fn js_new_tab_and_update_tab_both_scroll_to_top() {
-        let new_js = js_new_tab("a", "a.md");
-        let update_js = js_update_tab("a", "a.md");
+        let new_js = js_new_tab("a", "a.md", "/tmp/a.md");
+        let update_js = js_update_tab("a", "/tmp/a.md");
         // Both should scroll to top
         assert!(new_js.contains("scrollTop = 0"));
         assert!(update_js.contains("scrollTop = 0"));
@@ -1189,105 +1278,38 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
     }
 
-    // --- resolve_and_read_tab tests ---
+    // --- resolve_watched_path tests ---
 
     #[test]
-    fn resolve_and_read_tab_found() {
-        let dir = std::env::temp_dir().join("md_desk_test_resolve_read");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("resolve.md");
-        std::fs::write(&path, "# Resolved").unwrap();
-
+    fn resolve_watched_path_found() {
         let state = crate::watcher::WatcherState::new();
-        state.files.lock().unwrap().insert(path.to_string_lossy().to_string(), path.clone());
-
-        let result = resolve_and_read_tab(&state, "resolve.md");
-        assert!(result.is_some());
-        let (content, filename) = result.unwrap().unwrap();
-        assert_eq!(content, "# Resolved");
-        assert_eq!(filename, "resolve.md");
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn resolve_and_read_tab_not_found() {
-        let state = crate::watcher::WatcherState::new();
-        assert!(resolve_and_read_tab(&state, "missing").is_none());
-    }
-
-    #[test]
-    fn resolve_and_read_tab_title_without_ext() {
-        let dir = std::env::temp_dir().join("md_desk_test_resolve_noext");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("notes.md");
-        std::fs::write(&path, "content").unwrap();
-
-        let state = crate::watcher::WatcherState::new();
-        state.files.lock().unwrap().insert(path.to_string_lossy().to_string(), path.clone());
-
-        // "notes" should match "notes.md" via path_for_title fallback
-        let result = resolve_and_read_tab(&state, "notes");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().unwrap().0, "content");
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn resolve_and_read_tab_file_deleted() {
-        let state = crate::watcher::WatcherState::new();
-        // Path registered but file doesn't exist
+        let key = "/tmp/has.md".to_string();
         state.files.lock().unwrap().insert(
-            "/nonexistent_99999/gone.md".to_string(),
-            std::path::PathBuf::from("/nonexistent_99999/gone.md"),
+            key.clone(),
+            std::path::PathBuf::from(&key),
         );
-
-        let result = resolve_and_read_tab(&state, "gone.md");
-        assert!(result.is_some());
-        assert!(result.unwrap().is_err());
+        assert_eq!(
+            resolve_watched_path(&state, &key),
+            Some(std::path::PathBuf::from(&key))
+        );
     }
 
-    // --- resolve_and_save_tab tests ---
-
     #[test]
-    fn resolve_and_save_tab_success() {
-        let dir = std::env::temp_dir().join("md_desk_test_resolve_save");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("save.md");
-        std::fs::write(&path, "old").unwrap();
-
+    fn resolve_watched_path_not_found() {
         let state = crate::watcher::WatcherState::new();
-        state.files.lock().unwrap().insert(path.to_string_lossy().to_string(), path.clone());
-
-        let result = resolve_and_save_tab(&state, "save.md", "new content");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), path);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(resolve_watched_path(&state, "/tmp/missing.md"), None);
     }
 
     #[test]
-    fn resolve_and_save_tab_no_matching_file() {
-        let state = crate::watcher::WatcherState::new();
-        let err = resolve_and_save_tab(&state, "missing", "content").unwrap_err();
-        assert!(err.contains("No watched file"));
-    }
-
-    #[test]
-    fn resolve_and_save_tab_invalid_path() {
+    fn resolve_watched_path_rejects_non_canonical() {
+        // Map keys are canonical strings; partial / aliased paths must not match.
         let state = crate::watcher::WatcherState::new();
         state.files.lock().unwrap().insert(
-            "/nonexistent_dir_99999/bad.md".to_string(),
-            std::path::PathBuf::from("/nonexistent_dir_99999/bad.md"),
+            "/tmp/full/path.md".to_string(),
+            std::path::PathBuf::from("/tmp/full/path.md"),
         );
-
-        let err = resolve_and_save_tab(&state, "bad.md", "content").unwrap_err();
-        assert!(err.starts_with("Save error:"));
+        assert_eq!(resolve_watched_path(&state, "path.md"), None);
+        assert_eq!(resolve_watched_path(&state, "/tmp/path.md"), None);
     }
 
     // --- display_name_for_file tests ---

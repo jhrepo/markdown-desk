@@ -468,7 +468,7 @@ mod bridge_script_tests {
     // registered Tauri command with the expected argument shape.
 
     #[test]
-    fn cmd_s_invokes_save_file_with_title_and_content() {
+    fn cmd_s_invokes_save_file_with_path_and_content() {
         let s = bridge_js();
         // The handler opens with this exact `e.key === 's'` check; if
         // someone changes the key literal, this pins the regression.
@@ -477,8 +477,9 @@ mod bridge_script_tests {
             s.contains("invoke('save_file'"),
             "Cmd+S handler must invoke 'save_file'"
         );
-        // Payload shape the Rust command expects.
-        assert!(s.contains("title: title"), "save_file payload missing 'title'");
+        // Payload shape the Rust command expects (path, not title — title
+        // alone is ambiguous when two open files share the same basename).
+        assert!(s.contains("path: path"), "save_file payload missing 'path'");
         assert!(s.contains("content: editor.value"), "save_file payload missing 'content'");
     }
 

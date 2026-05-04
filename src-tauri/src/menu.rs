@@ -6,8 +6,10 @@ pub(crate) const JS_CHECK_UPDATE: &str =
     "if(typeof checkForUpdates==='function')checkForUpdates();";
 
 /// JS to save the active tab's content to its original file.
+/// Reads the canonical path from the `data-path` attribute that bridge.js
+/// stamps on every file-backed tab; same matching key the watcher uses.
 pub(crate) const JS_SAVE_FILE: &str =
-    "(function(){var t=document.querySelector('#tab-list .tab-item.active .tab-title');var e=document.getElementById('markdown-editor');if(t&&e&&window.__TAURI_INTERNALS__){window.__TAURI_INTERNALS__.invoke('save_file',{title:t.textContent.trim(),content:e.value})}})();";
+    "(function(){var a=document.querySelector('#tab-list .tab-item.active');var p=a?a.getAttribute('data-path'):'';var e=document.getElementById('markdown-editor');if(p&&e&&window.__TAURI_INTERNALS__){window.__TAURI_INTERNALS__.invoke('save_file',{path:p,content:e.value})}})();";
 
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let check_update_item = MenuItemBuilder::with_id("check_update", "Check for Updates...")
@@ -123,7 +125,8 @@ mod tests {
 
     #[test]
     fn js_save_file_reads_active_tab() {
-        assert!(JS_SAVE_FILE.contains(".tab-item.active .tab-title"));
+        assert!(JS_SAVE_FILE.contains(".tab-item.active"));
+        assert!(JS_SAVE_FILE.contains("data-path"));
         assert!(JS_SAVE_FILE.contains("markdown-editor"));
     }
 
@@ -144,8 +147,8 @@ mod tests {
     }
 
     #[test]
-    fn js_save_file_sends_title_and_content() {
-        assert!(JS_SAVE_FILE.contains("title:"));
+    fn js_save_file_sends_path_and_content() {
+        assert!(JS_SAVE_FILE.contains("path:"));
         assert!(JS_SAVE_FILE.contains("content:"));
     }
 
