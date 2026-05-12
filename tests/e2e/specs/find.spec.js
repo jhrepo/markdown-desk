@@ -29,6 +29,32 @@ describe('Cmd+F 텍스트 찾기', () => {
     await expect(findBar).toBeDisplayed();
   });
 
+  it('Cmd+F 우선권: 서브모듈의 자체 Find/Replace 모달은 노출되지 않는다', async () => {
+    // viewer 364cedd가 자체 Find/Replace 모달(`#find-replace-modal`)과
+    // markdownEditor.keydown('f') 핸들러를 추가했다. bridge.js가 document
+    // 레벨의 capture-phase Cmd+F 리스너에서 preventDefault + stopPropagation
+    // 하므로 서브모듈 모달은 절대 열리면 안 된다 — 만약 capture 우선권이
+    // 깨지면 사용자가 두 개의 Find UI를 동시에 보게 된다.
+    await browser.keys('Escape');
+    await browser.pause(100);
+
+    await browser.keys(['Meta', 'f']);
+    await browser.pause(200);
+
+    const bridgeBar = await $('.bridge-find-bar');
+    await expect(bridgeBar).toBeDisplayed();
+
+    const upstreamModal = await $('#find-replace-modal');
+    if (await upstreamModal.isExisting()) {
+      // 모달 자체는 정적 마크업으로 DOM에 존재할 수 있지만, 화면에는 보이면 안 됨.
+      const display = await upstreamModal.getCSSProperty('display');
+      expect(display.value).toBe('none');
+    }
+
+    await browser.keys('Escape');
+    await browser.pause(100);
+  });
+
   it('텍스트 입력 시 하이라이트와 카운트가 표시된다', async () => {
     await browser.keys(['Meta', 'f']);
 
@@ -110,14 +136,15 @@ describe('Cmd+F 텍스트 찾기', () => {
     await input.setValue('test');
     await browser.pause(300); // short pause for UI to process input
 
-    const viewBtn = await $('.view-mode-btn');
-    if (await viewBtn.isExisting()) {
-      await viewBtn.click();
-      await browser.pause(200);
+    // 데스크탑 헤더의 view-toggle 버튼. 364cedd에서 `.view-mode-btn`이 사라지면서
+    // 이전 `isExisting` 가드가 silent skip을 만들고 있었음. 정확한 셀렉터로 고정.
+    const viewBtn = await $('.view-toggle-btn[data-view-mode="editor"]');
+    await expect(viewBtn).toBeExisting();
+    await viewBtn.click();
+    await browser.pause(200);
 
-      const findBar = await $('.bridge-find-bar');
-      expect(await findBar.getCSSProperty('display')).toHaveProperty('value', 'none');
-    }
+    const findBar = await $('.bridge-find-bar');
+    expect(await findBar.getCSSProperty('display')).toHaveProperty('value', 'none');
   });
 
   it('탭 전환 시 검색 바가 자동으로 닫힌다', async () => {
