@@ -836,11 +836,14 @@
     }
 
     function closeTabsByIds(listEl, ids) {
-      // Snapshot-iterate: the tab bar re-renders after each delete, but the
-      // remaining data-tab-id nodes still resolve to the new delete buttons.
+      // Upstream now appends the action dropdown to document.body (id prefix
+      // `desktop-tab-menu-` / `mobile-tab-menu-`) instead of nesting it under
+      // [data-tab-id], so a descendant selector on listEl no longer reaches the
+      // delete button. Resolve the dropdown by its id and click delete there.
+      var prefix = listEl && listEl.id === 'mobile-tab-list' ? 'mobile-tab-menu' : 'desktop-tab-menu';
       ids.forEach(function(id) {
-        var sel = '[data-tab-id="' + CSS.escape(id) + '"] .tab-menu-item[data-action="delete"]';
-        var delBtn = listEl.querySelector(sel);
+        var dropdown = document.getElementById(prefix + '-' + id);
+        var delBtn = dropdown && dropdown.querySelector('.tab-menu-item[data-action="delete"]');
         if (delBtn) delBtn.click();
       });
       // Drop closed tabs from the bridge sidecar map. The startup GC catches
