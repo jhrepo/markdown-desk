@@ -765,7 +765,10 @@
     // Use event delegation on document since bridge.js runs before DOM is ready
     document.addEventListener('click', function(e) {
       if (!findBar || findBar.style.display === 'none') return;
-      var target = e.target.closest('.tab-item, .view-mode-btn, .mobile-view-mode-btn');
+      // Upstream 364cedd renamed desktop `.view-mode-btn` → `.view-toggle-btn`.
+      // Keep `.view-mode-btn` for any legacy/transitional markup and add the
+      // new class so desktop mode switches still auto-close the find bar.
+      var target = e.target.closest('.tab-item, .view-mode-btn, .view-toggle-btn, .mobile-view-mode-btn');
       if (target) closeFindBar();
     });
   })();
