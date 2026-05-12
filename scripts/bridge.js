@@ -849,30 +849,79 @@
       }
     }, 0);
 
-    document.addEventListener('keydown', function(e) {
-      if (!(e.metaKey || e.ctrlKey)) return;
+    function handleZoomKey(e) {
+      if (!(e.metaKey || e.ctrlKey)) return false;
       // `e.key` for Cmd+= is '=' on most layouts. Treat '+' the same so
       // Shift+Cmd+= (numpad +) also zooms in.
       if (e.key === '+' || e.key === '=') {
         e.preventDefault(); e.stopPropagation();
         applyZoom(helpers.nextZoomStep(currentZoom, +1));
-      } else if (e.key === '-' || e.key === '_') {
+        return true;
+      }
+      if (e.key === '-' || e.key === '_') {
         e.preventDefault(); e.stopPropagation();
         applyZoom(helpers.nextZoomStep(currentZoom, -1));
-      } else if (e.key === '0') {
+        return true;
+      }
+      if (e.key === '0') {
         e.preventDefault(); e.stopPropagation();
         applyZoom(1.0);
+        return true;
       }
-    }, true);
+      return false;
+    }
 
     // Trackpad pinch arrives as wheel with synthetic ctrlKey on macOS
     // WebKit. Real Ctrl/Cmd + wheel hits the same branch. Without
     // preventDefault the page also scrolls, which feels wrong.
-    window.addEventListener('wheel', function(e) {
-      if (!(e.ctrlKey || e.metaKey)) return;
+    function handleZoomWheel(e) {
+      if (!(e.ctrlKey || e.metaKey)) return false;
       e.preventDefault();
       applyZoom(helpers.nextZoomFromWheel(currentZoom, e.deltaY));
-    }, { passive: false, capture: true });
+      return true;
+    }
+
+    document.addEventListener('keydown', handleZoomKey, true);
+    window.addEventListener('wheel', handleZoomWheel, { passive: false, capture: true });
+
+    // @dev-hook-start
+    // Exposed in debug builds only (stripped by prepare-frontend.sh in
+    // release). Synthetic KeyboardEvent dispatch does NOT reach this
+    // module's capture-phase keydown listener in Tauri WKWebView — same
+    // limitation noted in keyboard-shortcuts.spec.js — so e2e calls these
+    // entry points directly to exercise the real branch + apply path.
+    window.__mdDeskZoomInternals = {
+      getZoom: function() { return currentZoom; },
+      getStorageKey: function() { return STORAGE_KEY; },
+      reset: function() {
+        currentZoom = 1.0;
+        try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+      },
+      pressKey: function(key, modifier) {
+        // modifier ∈ 'meta' | 'ctrl' | 'none' — explicit so 'none' can
+        // exercise the "no modifier → don't intercept" branch.
+        var ev = {
+          metaKey: modifier === 'meta',
+          ctrlKey: modifier === 'ctrl',
+          key: key,
+          preventDefault: function() {},
+          stopPropagation: function() {},
+        };
+        return handleZoomKey(ev);
+      },
+      scrollWheel: function(deltaY, modifier) {
+        // modifier ∈ 'ctrl' (covers trackpad pinch on macOS WebKit, which
+        // synthesizes ctrlKey) | 'meta' | 'none'.
+        var ev = {
+          ctrlKey: modifier === 'ctrl',
+          metaKey: modifier === 'meta',
+          deltaY: deltaY,
+          preventDefault: function() {},
+        };
+        return handleZoomWheel(ev);
+      },
+    };
+    // @dev-hook-end
   })();
 
   // --- Tab context menu (right-click) ---
