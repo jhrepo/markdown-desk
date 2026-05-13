@@ -175,3 +175,35 @@ test('nextZoomFromWheel: small trackpad delta produces small change', () => {
   const out = helpers.nextZoomFromWheel(1.0, -3);
   assert.ok(out > 1.0 && out < 1.1, `expected gentle zoom-in, got ${out}`);
 });
+
+// ---------------- pickInitialViewMode ----------------
+// Contract: choose the view mode a newly created tab should start in.
+// Whitelisted to the three Markdown-Viewer modes; anything else falls
+// back to the supplied default (and then to 'split' if even the fallback
+// is bogus) so a corrupted localStorage value can't strand the user.
+
+test('pickInitialViewMode: returns the saved value when it is a known mode', () => {
+  assert.equal(helpers.pickInitialViewMode('editor', 'split'), 'editor');
+  assert.equal(helpers.pickInitialViewMode('split', 'split'), 'split');
+  assert.equal(helpers.pickInitialViewMode('preview', 'split'), 'preview');
+});
+
+test('pickInitialViewMode: falls back when saved is unknown', () => {
+  assert.equal(helpers.pickInitialViewMode('foo', 'editor'), 'editor');
+  assert.equal(helpers.pickInitialViewMode('', 'preview'), 'preview');
+  assert.equal(helpers.pickInitialViewMode(null, 'split'), 'split');
+  assert.equal(helpers.pickInitialViewMode(undefined, 'editor'), 'editor');
+});
+
+test("pickInitialViewMode: falls back to 'split' when both inputs are unknown", () => {
+  assert.equal(helpers.pickInitialViewMode('bogus', 'also-bogus'), 'split');
+  assert.equal(helpers.pickInitialViewMode(null, null), 'split');
+});
+
+test('pickInitialViewMode: rejects non-string saved values (objects, numbers)', () => {
+  // Defensive against localStorage corruption (e.g., JSON written into a
+  // key expected to hold a plain string).
+  assert.equal(helpers.pickInitialViewMode(123, 'split'), 'split');
+  assert.equal(helpers.pickInitialViewMode({}, 'split'), 'split');
+  assert.equal(helpers.pickInitialViewMode([], 'split'), 'split');
+});
