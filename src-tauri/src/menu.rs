@@ -58,8 +58,11 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
         .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
+    // macOS 표기 관례에 맞춰 "⌘+"로 표시 (Safari/Chrome/Xcode 동일).
+    // 실제 키 입력은 ⌘⇧= 가 매칭되지만, bridge.js 의 keydown 리스너가
+    // ⌘= 단독 입력도 받으므로 사용자 입장에서 두 입력 모두 동작한다.
     let zoom_in_item = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-        .accelerator("CmdOrCtrl+=")
+        .accelerator("CmdOrCtrl+Plus")
         .build(app)?;
     let zoom_out_item = MenuItemBuilder::with_id("zoom_out", "Zoom Out")
         .accelerator("CmdOrCtrl+-")
