@@ -935,6 +935,117 @@
     // @dev-hook-end
   })();
 
+  // ---- Remember last-used view mode and apply it to new tabs ----
+  // Upstream Markdown-Viewer hard-codes every newly created tab to
+  // 'split' (Markdown-Viewer/script.js: createTab default + every newTab
+  // / reset / welcome callsite). Existing tabs keep their own viewMode,
+  // so we only intervene on tabs the user has never seen before — tracked
+  // by id-set diff against localStorage('markdownViewerTabs').
+  (function() {
+    var helpers = (typeof window !== 'undefined' && window.__bridgeHelpers) || null;
+    if (!helpers || !helpers.pickInitialViewMode) return;
+
+    var STORAGE_KEY = 'markdown-desk-last-view-mode';
+    var TABS_STORAGE_KEY = 'markdownViewerTabs';
+
+    function readSavedMode() {
+      try { return localStorage.getItem(STORAGE_KEY); } catch (_) { return null; }
+    }
+    function writeSavedMode(mode) {
+      try { localStorage.setItem(STORAGE_KEY, mode); } catch (_) {}
+    }
+    function readTabIds() {
+      try {
+        var arr = JSON.parse(localStorage.getItem(TABS_STORAGE_KEY) || '[]');
+        var ids = Object.create(null);
+        arr.forEach(function(t) { if (t && t.id) ids[t.id] = 1; });
+        return ids;
+      } catch (_) { return Object.create(null); }
+    }
+
+    // Snapshot of tab ids already known to us. Initialized lazily on
+    // first DOM ready so the first paint (which restores the active tab
+    // with its own saved viewMode) is NOT overridden — last-mode applies
+    // only to genuinely new tabs created during the session.
+    var knownTabIds = null;
+
+    document.addEventListener('click', function(e) {
+      var t = e.target && e.target.closest
+        ? e.target.closest('.view-toggle-btn, .mobile-view-mode-btn')
+        : null;
+      if (!t) return;
+      var mode = t.getAttribute('data-view-mode') || t.getAttribute('data-mode');
+      if (helpers.VIEW_MODES.indexOf(mode) < 0) return;
+      writeSavedMode(mode);
+    }, true);
+
+    function detectAddedTabIds() {
+      var cur = readTabIds();
+      if (knownTabIds === null) {
+        knownTabIds = cur;
+        return [];
+      }
+      var added = [];
+      Object.keys(cur).forEach(function(id) {
+        if (!knownTabIds[id]) added.push(id);
+      });
+      knownTabIds = cur;
+      return added;
+    }
+
+    function applyLastModeIfNeeded() {
+      var added = detectAddedTabIds();
+      if (!added.length) return;
+      var saved = readSavedMode();
+      var target = helpers.pickInitialViewMode(saved, 'split');
+      if (target === 'split') return; // submodule default — nothing to do.
+
+      // Only act when the active tab is one of the newly added ones —
+      // otherwise switchTab on an existing tab is rehydrating that tab's
+      // own preserved viewMode and we must not override it.
+      var activeEl = document.querySelector('#tab-list .tab-item.active');
+      var activeId = activeEl ? activeEl.getAttribute('data-tab-id') : null;
+      if (!activeId || added.indexOf(activeId) < 0) return;
+
+      // Synthesize a click on the matching desktop toggle. We avoid
+      // calling setViewMode directly because it lives in the submodule
+      // closure; the click path also runs saveCurrentTabState() so the
+      // new tab's stored viewMode persists across switches.
+      var btn = document.querySelector('.view-toggle-btn[data-view-mode="' + target + '"]');
+      if (btn) btn.click();
+    }
+
+    // Wait for the host to render the initial tab bar before snapshotting.
+    document.addEventListener('DOMContentLoaded', function() {
+      // Defer one task: initTabs runs on DOMContentLoaded and may render
+      // after our handler (listener order isn't guaranteed across files).
+      setTimeout(function() {
+        knownTabIds = readTabIds();
+      }, 0);
+
+      var tabList = document.getElementById('tab-list');
+      if (!tabList) return;
+      var mo = new MutationObserver(function() {
+        applyLastModeIfNeeded();
+      });
+      mo.observe(tabList, { childList: true, subtree: false });
+    });
+
+    // Expose for e2e — stripped in release.
+    // @dev-hook-start
+    window.__mdDeskViewModeInternals = {
+      getSavedMode: readSavedMode,
+      setSavedMode: writeSavedMode,
+      clearSavedMode: function() {
+        try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+      },
+      resetKnownTabs: function() { knownTabIds = readTabIds(); },
+      forgetTab: function(id) { if (knownTabIds) delete knownTabIds[id]; },
+      applyLastModeIfNeeded: applyLastModeIfNeeded,
+    };
+    // @dev-hook-end
+  })();
+
   // --- Tab context menu (right-click) ---
   // Close Tab / Close Other Tabs / Close Tabs to the Right / Close Tabs to the Left
   // Reuses the existing per-tab 3-dot Delete action instead of manipulating the

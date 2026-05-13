@@ -81,13 +81,31 @@
     return clampZoom(round2(current + step), ZOOM_MIN, ZOOM_MAX);
   }
 
+  // ---- View mode helpers ----
+  // The submodule's createTab() hard-codes 'split' for every new tab and
+  // does not honor the user's recent preference. bridge.js records the
+  // last-used mode in localStorage and applies it on each new tab; this
+  // helper validates the stored value against the known mode whitelist so
+  // a single corrupted write can't push the host into an unrenderable
+  // state.
+
+  var VIEW_MODES = ['editor', 'split', 'preview'];
+
+  function pickInitialViewMode(saved, fallback) {
+    if (typeof saved === 'string' && VIEW_MODES.indexOf(saved) >= 0) return saved;
+    if (typeof fallback === 'string' && VIEW_MODES.indexOf(fallback) >= 0) return fallback;
+    return 'split';
+  }
+
   return {
     shouldRunBackgroundCheck: shouldRunBackgroundCheck,
     getExportBaseName: getExportBaseName,
     clampZoom: clampZoom,
     nextZoomStep: nextZoomStep,
     nextZoomFromWheel: nextZoomFromWheel,
+    pickInitialViewMode: pickInitialViewMode,
     ZOOM_MIN: ZOOM_MIN,
     ZOOM_MAX: ZOOM_MAX,
+    VIEW_MODES: VIEW_MODES,
   };
 });
