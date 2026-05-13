@@ -269,16 +269,15 @@
       try { localStorage.setItem(UPDATE_LAST_CHECK_KEY, String(Date.now())); } catch (e) {}
       if (update) {
         _pendingUpdate = update;
-        if (mode === MODE_MANUAL) {
-          await runUpdateInstall(update, { skipConfirm: false });
-        } else {
-          var snoozed = localStorage.getItem(UPDATE_SNOOZED_KEY);
-          if (snoozed !== update.version) {
-            // showUpdateBanner owns the full teardown→set sequence for the
-            // title suffix so the set invoke always wins over any nested
-            // hide from "replace prior banner" logic.
-            showUpdateBanner(update.version);
-          }
+        // Unified alert path: both manual and background land on the status
+        // bar. Background respects the snooze (so we don't repeatedly nag),
+        // but a manual menu click bypasses snooze — the user explicitly
+        // asked, and silently doing nothing would look like the check broke.
+        // showUpdateBanner owns the full teardown→set sequence for the title
+        // suffix so the set invoke always wins over any nested hide.
+        var snoozed = localStorage.getItem(UPDATE_SNOOZED_KEY);
+        if (mode === MODE_MANUAL || snoozed !== update.version) {
+          showUpdateBanner(update.version);
         }
       } else if (mode === MODE_MANUAL) {
         if (window.__TAURI__.dialog) {

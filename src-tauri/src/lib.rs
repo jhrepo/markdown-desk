@@ -772,6 +772,59 @@ mod bridge_update_check_tests {
             "snooze clear must happen inside the success path, before the catch block"
         );
     }
+
+    #[test]
+    fn manual_check_routes_updates_to_status_bar_not_dialog() {
+        let s = bridge_js();
+        // Pre-unification, the MODE_MANUAL branch called
+        // `runUpdateInstall(update, { skipConfirm: false })`, which popped a
+        // synchronous "New version X is available. Update now?" confirm
+        // dialog — a second alert path competing with the status bar.
+        // After unification, both modes route to showUpdateBanner; the banner's
+        // Update button is the *only* caller of runUpdateInstall and it always
+        // passes skipConfirm: true. The literal "skipConfirm: false" returning
+        // means the legacy dialog path has regressed.
+        assert!(
+            !s.contains("skipConfirm: false"),
+            "Manual update check must not invoke runUpdateInstall with \
+             skipConfirm: false — that reintroduces the dialog we unified \
+             into the status bar"
+        );
+    }
+
+    #[test]
+    fn manual_check_keeps_no_update_and_failure_dialogs() {
+        let s = bridge_js();
+        // Manual check is an explicit user action: the menu click expects
+        // feedback. The status bar only renders when *there is* an update,
+        // so the no-update and check-failed paths must still surface as
+        // dialogs — otherwise pressing the menu yields nothing.
+        assert!(
+            s.contains("'You are using the latest version.'"),
+            "Manual no-update feedback dialog missing"
+        );
+        assert!(
+            s.contains("'Failed to check for updates.'"),
+            "Manual check-failed dialog missing"
+        );
+    }
+
+    #[test]
+    fn manual_check_bypasses_snooze() {
+        let s = bridge_js();
+        // After unification, the snooze key still gates background checks
+        // (so we don't repeatedly nag), but a manual menu click bypasses it.
+        // Without this, dismissing once and then trying "Check for Updates…"
+        // produces no feedback — equivalent to a silent failure.
+        // The bridge implements this as `mode === MODE_MANUAL || snoozed !==
+        // update.version`. Both halves must remain present.
+        assert!(
+            s.contains("mode === MODE_MANUAL || snoozed !== update.version"),
+            "Manual check must bypass snooze when an update is present \
+             (expected `mode === MODE_MANUAL || snoozed !== update.version` \
+             guard in doCheckForUpdates)"
+        );
+    }
 }
 
 /// Structural invariants for `scripts/prepare-frontend.sh`.
