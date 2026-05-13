@@ -11,6 +11,18 @@ pub(crate) const JS_CHECK_UPDATE: &str =
 pub(crate) const JS_SAVE_FILE: &str =
     "(function(){var a=document.querySelector('#tab-list .tab-item.active');var p=a?a.getAttribute('data-path'):'';var e=document.getElementById('markdown-editor');if(p&&e&&window.__TAURI_INTERNALS__){window.__TAURI_INTERNALS__.invoke('save_file',{path:p,content:e.value})}})();";
 
+/// JS snippets dispatched by View → Zoom menu items. Route through the
+/// release-included `window.__mdDeskZoomMenu` so the menu shares the
+/// applyZoom path (clamp + localStorage persist + IPC). The `typeof` guard
+/// matters because a menu click can race the very first paint where
+/// bridge.js's zoom IIFE has not yet executed.
+pub(crate) const JS_ZOOM_IN: &str =
+    "if(typeof window.__mdDeskZoomMenu==='object')window.__mdDeskZoomMenu.in();";
+pub(crate) const JS_ZOOM_OUT: &str =
+    "if(typeof window.__mdDeskZoomMenu==='object')window.__mdDeskZoomMenu.out();";
+pub(crate) const JS_ZOOM_RESET: &str =
+    "if(typeof window.__mdDeskZoomMenu==='object')window.__mdDeskZoomMenu.reset();";
+
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     let check_update_item = MenuItemBuilder::with_id("check_update", "Check for Updates...")
         .build(app)?;
@@ -46,7 +58,21 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
         .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
+    let zoom_in_item = MenuItemBuilder::with_id("zoom_in", "Zoom In")
+        .accelerator("CmdOrCtrl+=")
+        .build(app)?;
+    let zoom_out_item = MenuItemBuilder::with_id("zoom_out", "Zoom Out")
+        .accelerator("CmdOrCtrl+-")
+        .build(app)?;
+    let zoom_reset_item = MenuItemBuilder::with_id("zoom_reset", "Actual Size")
+        .accelerator("CmdOrCtrl+0")
+        .build(app)?;
+
     let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&zoom_in_item)
+        .item(&zoom_out_item)
+        .item(&zoom_reset_item)
+        .item(&PredefinedMenuItem::separator(app)?)
         .fullscreen()
         .build()?;
 
@@ -63,6 +89,9 @@ pub(crate) enum MenuAction {
     Open,
     Save,
     CheckUpdate,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     Unknown,
 }
 
@@ -72,6 +101,9 @@ pub(crate) fn resolve_menu_action(id: &str) -> MenuAction {
         "open" => MenuAction::Open,
         "save" => MenuAction::Save,
         "check_update" => MenuAction::CheckUpdate,
+        "zoom_in" => MenuAction::ZoomIn,
+        "zoom_out" => MenuAction::ZoomOut,
+        "zoom_reset" => MenuAction::ZoomReset,
         _ => MenuAction::Unknown,
     }
 }
@@ -94,6 +126,24 @@ pub fn setup_menu_events(app: &tauri::AppHandle) {
                 dbg_log!("[menu] Check for Updates clicked");
                 if let Some(ww) = app_handle.get_webview_window("main") {
                     let _ = ww.eval(JS_CHECK_UPDATE);
+                }
+            }
+            MenuAction::ZoomIn => {
+                dbg_log!("[menu] Zoom In clicked");
+                if let Some(ww) = app_handle.get_webview_window("main") {
+                    let _ = ww.eval(JS_ZOOM_IN);
+                }
+            }
+            MenuAction::ZoomOut => {
+                dbg_log!("[menu] Zoom Out clicked");
+                if let Some(ww) = app_handle.get_webview_window("main") {
+                    let _ = ww.eval(JS_ZOOM_OUT);
+                }
+            }
+            MenuAction::ZoomReset => {
+                dbg_log!("[menu] Actual Size clicked");
+                if let Some(ww) = app_handle.get_webview_window("main") {
+                    let _ = ww.eval(JS_ZOOM_RESET);
                 }
             }
             MenuAction::Unknown => {}
@@ -192,5 +242,60 @@ mod tests {
         // "Open" (capitalized) should not match "open"
         assert!(matches!(resolve_menu_action("Open"), MenuAction::Unknown));
         assert!(matches!(resolve_menu_action("SAVE"), MenuAction::Unknown));
+    }
+
+    // --- Zoom menu items (View → Zoom In / Zoom Out / Actual Size) ---
+    // Each JS snippet must call into bridge.js's release-included public
+    // entry point (`window.__mdDeskZoomMenu`) so the menu route shares the
+    // same applyZoom path — clamp, localStorage persist, and IPC call.
+
+    #[test]
+    fn js_zoom_in_calls_public_entry_point() {
+        assert!(JS_ZOOM_IN.contains("__mdDeskZoomMenu"));
+        assert!(JS_ZOOM_IN.contains(".in()"));
+    }
+
+    #[test]
+    fn js_zoom_out_calls_public_entry_point() {
+        assert!(JS_ZOOM_OUT.contains("__mdDeskZoomMenu"));
+        assert!(JS_ZOOM_OUT.contains(".out()"));
+    }
+
+    #[test]
+    fn js_zoom_reset_calls_public_entry_point() {
+        assert!(JS_ZOOM_RESET.contains("__mdDeskZoomMenu"));
+        assert!(JS_ZOOM_RESET.contains(".reset()"));
+    }
+
+    #[test]
+    fn js_zoom_snippets_have_typeof_guard() {
+        // Menu eval can fire before bridge.js is ready — guard against
+        // undefined to avoid a noisy console error on first paint.
+        for snippet in [JS_ZOOM_IN, JS_ZOOM_OUT, JS_ZOOM_RESET] {
+            assert!(snippet.contains("typeof"), "missing typeof guard: {snippet}");
+        }
+    }
+
+    #[test]
+    fn js_zoom_snippets_are_single_statement() {
+        for snippet in [JS_ZOOM_IN, JS_ZOOM_OUT, JS_ZOOM_RESET] {
+            assert!(!snippet.contains('\n'));
+            assert!(snippet.ends_with(';'));
+        }
+    }
+
+    #[test]
+    fn resolve_menu_action_zoom_in() {
+        assert!(matches!(resolve_menu_action("zoom_in"), MenuAction::ZoomIn));
+    }
+
+    #[test]
+    fn resolve_menu_action_zoom_out() {
+        assert!(matches!(resolve_menu_action("zoom_out"), MenuAction::ZoomOut));
+    }
+
+    #[test]
+    fn resolve_menu_action_zoom_reset() {
+        assert!(matches!(resolve_menu_action("zoom_reset"), MenuAction::ZoomReset));
     }
 }

@@ -884,6 +884,17 @@
     document.addEventListener('keydown', handleZoomKey, true);
     window.addEventListener('wheel', handleZoomWheel, { passive: false, capture: true });
 
+    // Release-included public entry point for the native View → Zoom menu.
+    // Menu accelerators fire NSMenu first (the OS swallows the keydown so the
+    // capture-phase listener above is never invoked from a menu accelerator),
+    // so menu_event handlers in src-tauri/src/menu.rs eval one of these
+    // functions to share the same applyZoom path — clamp + persist + IPC.
+    window.__mdDeskZoomMenu = {
+      in: function() { applyZoom(helpers.nextZoomStep(currentZoom, +1)); },
+      out: function() { applyZoom(helpers.nextZoomStep(currentZoom, -1)); },
+      reset: function() { applyZoom(1.0); },
+    };
+
     // @dev-hook-start
     // Exposed in debug builds only (stripped by prepare-frontend.sh in
     // release). Synthetic KeyboardEvent dispatch does NOT reach this
