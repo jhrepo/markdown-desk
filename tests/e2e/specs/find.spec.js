@@ -159,7 +159,10 @@ describe('Cmd+F 텍스트 찾기', () => {
       await browser.pause(300);
       tabs = await $$('#tab-list .tab-item');
     }
-    if (tabs.length < 2) return; // harness couldn't create a second tab
+    // Fail loudly instead of silently passing — if `.tab-new-btn` ever
+    // stops working (selector drift, host disabling), the original
+    // `return` swallowed the whole test as a pass with zero assertions.
+    expect(tabs.length).toBeGreaterThanOrEqual(2);
 
     await browser.keys(['Meta', 'f']);
     const input = await $('.bridge-find-bar input');
@@ -167,8 +170,11 @@ describe('Cmd+F 텍스트 찾기', () => {
     await browser.pause(300);
 
     const freshTabs = await $$('#tab-list .tab-item');
-    // Click whichever tab is not currently active.
-    const targetIdx = (await freshTabs[0].getAttribute('class')).includes('active') ? 1 : 0;
+    // Click whichever tab is not currently active. substring 비교(`.includes`)
+    // 는 'is-active' / 'deactivated' 같은 변형도 truthy 라 false positive 가
+    // 난다. 토큰 단위 일치로 한정.
+    const firstClass = (await freshTabs[0].getAttribute('class')) || '';
+    const targetIdx = firstClass.split(/\s+/).includes('active') ? 1 : 0;
     await freshTabs[targetIdx].click();
     await browser.pause(250);
 

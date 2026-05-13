@@ -57,6 +57,17 @@ describe('뷰 모드 전환', () => {
     // 회귀 가드: 탭 간/모드 간 전환에서 한쪽 페인 width가 0 또는 viewport 폭의
     // 90% 이상 같은 극단치로 굳어버리는 회귀(PR #68 계열 + viewer #93 라인번호
     // gutter 추가로 인한 폭 계산 영향)를 잡는다.
+    //
+    // 시작 시 splitter 위치를 50/50 으로 강제: 이전 spec 또는 사용자 드래그가
+    // editor-pane / preview-pane 에 inline width 를 남겼다면 그 값이 split
+    // 복귀 시 그대로 살아남아 본 회귀 가드의 합리적-폭 단언을 사실상
+    // 우연 통과로 만든다. inline width 만 비워도 submodule 의 split 분기가
+    // 다음 클릭에서 기본 분할로 다시 계산한다.
+    await browser.execute(() => {
+      document.querySelectorAll('.editor-pane, .preview-pane').forEach((p) => {
+        if (p && p.style) p.style.width = '';
+      });
+    });
     await $(VIEW_BTN('split')).then((b) => b.click());
     await browser.pause(200);
     await $(VIEW_BTN('editor')).then((b) => b.click());

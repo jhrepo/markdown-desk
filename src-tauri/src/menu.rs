@@ -58,11 +58,15 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
         .item(&PredefinedMenuItem::select_all(app, None)?)
         .build()?;
 
-    // macOS 표기 관례에 맞춰 "⌘+"로 표시 (Safari/Chrome/Xcode 동일).
-    // 실제 키 입력은 ⌘⇧= 가 매칭되지만, bridge.js 의 keydown 리스너가
-    // ⌘= 단독 입력도 받으므로 사용자 입장에서 두 입력 모두 동작한다.
+    // `=` (not `Plus`) so NSMenu renders `⌘=` rather than `⇧⌘=`. The
+    // `Plus` token bound to the shifted `+` glyph and pulled `⇧` into
+    // the menu shortcut, which conflicted with the comment claim of
+    // `⌘+` and with the keystroke users typically associate with the
+    // action. bridge.js's handleZoomKey already accepts both `=` and
+    // `+`, so a user reaching for Cmd+Shift+= (the keycap path) still
+    // zooms in — the change is purely the menu glyph.
     let zoom_in_item = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-        .accelerator("CmdOrCtrl+Plus")
+        .accelerator("CmdOrCtrl+=")
         .build(app)?;
     let zoom_out_item = MenuItemBuilder::with_id("zoom_out", "Zoom Out")
         .accelerator("CmdOrCtrl+-")

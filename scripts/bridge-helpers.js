@@ -97,6 +97,32 @@
     return 'split';
   }
 
+  // Version-token whitelist mirroring `is_safe_version_token` in
+  // src-tauri/src/commands.rs. The value comes from the updater feed and
+  // gets spliced into the "What's new" link's href; if Tauri isn't around
+  // (dev server, e2e Playwright) the browser would otherwise follow that
+  // href verbatim. Keeping the same whitelist on both sides means the link
+  // can never escape the markdown-desk repo URL path.
+  //
+  // The regex requires at least one digit per segment and caps at six
+  // segments — closes the dot-only / leading-dot / trailing-dot holes the
+  // earlier `^[0-9.]+$` left open.
+  function isSafeVersionToken(version) {
+    if (typeof version !== 'string') return false;
+    if (version.length === 0 || version.length > 32) return false;
+    return /^\d+(\.\d+){0,5}$/.test(version);
+  }
+
+  // Build the GitHub release-tag URL for a validated version, or null when
+  // the version fails the whitelist. Centralized so every banner-href
+  // callsite goes through the same validation — no chance of a future
+  // splicing site forgetting to call isSafeVersionToken first.
+  var RELEASE_TAG_URL_PREFIX = 'https://github.com/jhrepo/markdown-desk/releases/tag/v';
+  function buildReleaseUrl(version) {
+    if (!isSafeVersionToken(version)) return null;
+    return RELEASE_TAG_URL_PREFIX + version;
+  }
+
   return {
     shouldRunBackgroundCheck: shouldRunBackgroundCheck,
     getExportBaseName: getExportBaseName,
@@ -104,6 +130,9 @@
     nextZoomStep: nextZoomStep,
     nextZoomFromWheel: nextZoomFromWheel,
     pickInitialViewMode: pickInitialViewMode,
+    isSafeVersionToken: isSafeVersionToken,
+    buildReleaseUrl: buildReleaseUrl,
+    RELEASE_TAG_URL_PREFIX: RELEASE_TAG_URL_PREFIX,
     ZOOM_MIN: ZOOM_MIN,
     ZOOM_MAX: ZOOM_MAX,
     VIEW_MODES: VIEW_MODES,

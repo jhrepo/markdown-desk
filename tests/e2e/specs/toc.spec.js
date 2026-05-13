@@ -19,8 +19,10 @@ describe('TOC 플로팅 드로어', () => {
       }
     });
     // Also make sure the view isn't stuck in editor-only mode from a
-    // prior test — split keeps the preview pane visible.
-    const splitBtn = await $('.view-mode-btn[data-mode="split"]');
+    // prior test — split keeps the preview pane visible. Upstream 364cedd
+    // renamed `.view-mode-btn[data-mode]` → `.view-toggle-btn[data-view-mode]`,
+    // so the old selector silently never matched and this guard slipped.
+    const splitBtn = await $('.view-toggle-btn[data-view-mode="split"]');
     if (await splitBtn.isExisting()) {
       await splitBtn.click();
       await browser.pause(250);
@@ -42,8 +44,13 @@ describe('TOC 플로팅 드로어', () => {
   }
 
   it('FAB 클릭으로 drawer 가 열린다 (FAB 은 숨겨진다)', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
 
     await fab.click();
     await browser.pause(250);
@@ -69,8 +76,13 @@ describe('TOC 플로팅 드로어', () => {
   });
 
   it('ESC 키로 drawer 가 닫힌다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
 
     await fab.click();
     await browser.pause(250);
@@ -83,9 +95,59 @@ describe('TOC 플로팅 드로어', () => {
     expect(open).toBe(false);
   });
 
-  it('헤딩을 포함한 문서의 drawer 에 항목이 문서 순서대로 나열된다', async function () {
+  it('FAB/drawer 외부 클릭 시 drawer 가 닫힌다', async function () {
+    // 클릭으로 토글-오픈한 뒤 마우스가 그대로 머물러 있으면 mouseleave 가
+    // 발화하지 않아 hover-close 가 안 돈다. 외부 클릭이 닫기 경로의
+    // fallback 으로 동작해야 한다. (커밋 25bdd8f 의 “X 버튼 잉여” 전제.)
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
+
+    await fab.click();
+    await browser.pause(250);
+    await browser.execute(() => {
+      // FAB / drawer 바깥의 안전한 좌표를 직접 클릭 — 에디터 textarea 가
+      // 항상 존재하므로 그걸 외부 클릭 타깃으로 사용.
+      const editor = document.getElementById('markdown-editor');
+      editor.click();
+    });
+    await browser.pause(150);
+    const open = await browser.execute(() =>
+      document.getElementById('toc-drawer').classList.contains('open')
+    );
+    expect(open).toBe(false);
+  });
+
+  it('FAB aria-expanded 가 drawer 상태에 따라 토글된다', async function () {
+    // hover 모델로 전환되면서 클릭은 더 이상 “주” 어포던스가 아니다.
+    // 보조기술 사용자에게 상태를 전달할 유일한 신호가 aria-expanded 이므로
+    // 회귀 시 명확히 깬다.
+    const fab = await $('#toc-fab');
+    await expect(fab).toBeExisting();
+
+    const initial = await fab.getAttribute('aria-expanded');
+    expect(initial).toBe('false');
+
+    await fab.click();
+    await browser.pause(250);
+    expect(await browser.execute(
+      () => document.getElementById('toc-fab').getAttribute('aria-expanded')
+    )).toBe('true');
+
+    await browser.keys('Escape');
+    await browser.pause(250);
+    expect(await browser.execute(
+      () => document.getElementById('toc-fab').getAttribute('aria-expanded')
+    )).toBe('false');
+  });
+
+  it('헤딩을 포함한 문서의 drawer 에 항목이 문서 순서대로 나열된다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
+    const fab = await $('#toc-fab');
+    await expect(fab).toBeExisting();
     await seedPreviewWithHeadings();
 
     await fab.click();
@@ -98,8 +160,13 @@ describe('TOC 플로팅 드로어', () => {
   });
 
   it('drawer 항목 클릭 시 preview 가 해당 헤딩 위치로 스크롤된다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
     await seedPreviewWithHeadings();
 
     // Pad the document so there's enough space to scroll.
@@ -144,8 +211,13 @@ describe('TOC 플로팅 드로어', () => {
   });
 
   it('사용자가 preview 를 스크롤하면 drawer 의 active 헤딩이 따라간다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
 
     // Large document so each heading sits far enough apart to exercise the
     // scroll→active handler.
@@ -217,8 +289,13 @@ describe('TOC 플로팅 드로어', () => {
   });
 
   it('FAB hover 시 drawer 가 자동으로 펼쳐진다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
 
     // Dispatch mouseenter directly — WebDriver pointer.move on macOS WKWebView
     // doesn't reliably trip the synthetic hover bridge. Hover-intent timer
@@ -240,8 +317,13 @@ describe('TOC 플로팅 드로어', () => {
   });
 
   it('FAB / drawer 영역을 동시에 벗어나면 drawer 가 다시 닫힌다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
 
     // Open via hover, then leave both. Close grace is 250ms — poll up to
     // 1.5s so slow CI doesn't race the timer.
@@ -274,8 +356,13 @@ describe('TOC 플로팅 드로어', () => {
   });
 
   it('editor 모드로 전환하면 FAB 와 drawer 가 모두 숨겨진다', async function () {
+    // scripts/toc.js:108 unconditionally creates #toc-fab on DOMContentLoaded,
+    // so the FAB must always exist. Asserting existence (instead of the
+    // earlier silent `this.skip()`) means a future regression that fails
+    // to create the FAB — e.g. selector drift or a load-order break —
+    // fails this spec loudly rather than passing 8 cases as no-ops.
     const fab = await $('#toc-fab');
-    if (!(await fab.isExisting())) return this.skip();
+    await expect(fab).toBeExisting();
 
     // beforeEach already puts us in split mode with drawer closed, so
     // realign() has had time to mark the FAB visible. Wait for that to
@@ -292,8 +379,12 @@ describe('TOC 플로팅 드로어', () => {
     }));
     expect(beforeHidden.fab).toBe(false);
 
-    const editorBtn = await $('.view-mode-btn[data-mode="editor"]');
-    if (!(await editorBtn.isExisting())) return this.skip();
+    // Upstream rename: `.view-mode-btn[data-mode]` → `.view-toggle-btn[data-view-mode]`.
+    // Assert existence (don't `this.skip()`) so a future selector regression
+    // fails loudly instead of silently skipping the most valuable guard here
+    // — "editor 모드 시 FAB·drawer 가 보이지 않는다".
+    const editorBtn = await $('.view-toggle-btn[data-view-mode="editor"]');
+    await expect(editorBtn).toBeExisting();
     await editorBtn.click();
     // toc.js polls realign 200ms after view-mode click; poll the DOM
     // instead of a fixed pause so slow CI doesn't race the transition.

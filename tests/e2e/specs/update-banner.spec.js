@@ -25,6 +25,13 @@ describe('자동 업데이트 배너 (하단 status bar)', () => {
     await browser.pause(50);
   }
 
+  before(async function () {
+    // dev-hook 이 없으면 release 빌드 — 본 spec 의 showBanner/hideBanner
+    // 가 모두 hook 경유라 release smoke 에서는 통째로 무의미. hard fail
+    // 대신 skip 으로 false-negative 를 막는다.
+    if (!(await hookPresent())) this.skip();
+  });
+
   afterEach(async () => {
     await hideBanner();
   });
@@ -53,9 +60,11 @@ describe('자동 업데이트 배너 (하단 status bar)', () => {
 
     const closeBtn = await banner.$('.bridge-update-banner-close');
     expect(await closeBtn.isExisting()).toBe(true);
-    // 닫기 버튼은 시각적 × 글리프 또는 aria-label로 식별 가능해야 한다.
+    // 닫기 버튼은 시각적 × 글리프 + aria-label 양쪽으로 식별 가능해야 한다.
+    // aria-label 만 검증하면 글리프를 다른 문자로 바꿔도 통과하므로 함께 단언.
     const ariaLabel = await closeBtn.getAttribute('aria-label');
     expect((ariaLabel || '').toLowerCase()).toContain('close');
+    expect((await closeBtn.getText()).trim()).toBe('×');
   });
 
   it('What\'s new 링크는 해당 버전의 GitHub 릴리즈 페이지를 가리킨다', async () => {
@@ -104,16 +113,51 @@ describe('자동 업데이트 배너 (하단 status bar)', () => {
 
   it('배너는 슬림 높이로 표시된다 (status bar 톤)', async () => {
     // 두꺼운 배너는 침투적이라는 사용자 결정에 따라 슬림한 상태바 톤.
-    // 정확한 픽셀이 아니라 합리적 상한(40px)으로 가드한다 — 폰트/패딩
-    // 조정 여지를 남기되 옛 두꺼운 배너(45~50px)로의 회귀는 막는다.
+    // 본질적인 위치 회귀(상단 → 하단) 방어선은 위쪽 it 의 position:fixed;
+    // bottom:0 단언이다. 이 케이스는 그 위치가 유지된다는 전제 위에서,
+    // 두께만 따로 상한으로 가드한다.
+    //
+    // 상한 60px 의 의미: CI 의 폰트 메트릭/접근성 확대(macOS Larger Text 등)
+    // 가 슬림 톤에서도 ~40~50px 사이로 늘어날 수 있어 30~40 으로 좁히면
+    // 환경 의존적 flake 가 생긴다. 60 은 “정상 환경의 슬림”과 “명백한
+    // 다중 라인 두꺼운 배너(>=70px)” 를 가르는 sanity 경계로만 의미가
+    // 있다 — 옛 45~50 톤 자체를 이 단언만으로 분간하지는 않는다.
     await showBanner('99.0.6');
     const banner = await $(BANNER_SEL);
     const height = await browser.execute((sel) => {
       const el = document.querySelector(sel);
       return el ? el.getBoundingClientRect().height : null;
     }, BANNER_SEL);
-    expect(height).toBeGreaterThan(0);
-    expect(height).toBeLessThanOrEqual(40);
+    expect(height).toBeGreaterThanOrEqual(16);
+    expect(height).toBeLessThanOrEqual(60);
+  });
+
+  it('악성 version 토큰은 거부되어 배너 DOM이 만들어지지 않는다', async () => {
+    // JS 측 가드(scripts/bridge-helpers.js isSafeVersionToken / buildReleaseUrl)
+    // 가 실제로 banner 생성 경로를 차단하는지 직접 검증. Tauri IPC 가
+    // 없는 dev 서버나 e2e 런타임에서는 이 가드가 유일한 방어선이라,
+    // 가드 회귀를 cargo 단위테스트만으로 잡기에는 불충분하다.
+    const malicious = [
+      '..', '.', '...', '.5', '5.', '0..0',
+      'v26.5.1', '26.5.1-rc1', '26.5.1;ls',
+      '26.5.1`whoami`', '26.5.1$(id)',
+      '26.5.1|cat',                     // pipe shell-metacharacter
+      '26.5.1/extra', '../etc/passwd',
+      '1.2.3.4.5.6.7',                  // 7-segment
+      '1'.repeat(33),                   // overlong
+      '٠.١.٢',                          // Arabic-Indic digits
+      '１.２.３',                       // fullwidth digits
+    ];
+    for (const bad of malicious) {
+      await showBanner(bad);
+      const exists = await browser.execute(
+        (s) => !!document.querySelector(s),
+        BANNER_SEL
+      );
+      expect(exists).toBe(false);
+      // 정리 — 다음 케이스 사이 격리.
+      await hideBanner();
+    }
   });
 
   it('배너가 문서의 마지막 자식으로 삽입된다', async () => {

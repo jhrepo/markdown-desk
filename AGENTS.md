@@ -111,7 +111,7 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - [ ] 메뉴 > Check for Updates — 업데이트 있으면 하단 status bar 표시(snooze 무시), 없으면 "latest version" 다이얼로그, 실패 시 에러 다이얼로그
 - [ ] 업데이트 존재 시 실행 2초 후 하단 status bar + 타이틀바 " — Update Available" 표시 (24h 창 내면 생략, 백그라운드는 snooze 존중) ✅
 - [ ] status bar의 Update 버튼 → 기존 다운로드/재시작 플로우
-- [ ] status bar의 What's new 링크 → 외부 브라우저로 GitHub 릴리즈 페이지 (`releases/tag/v<version>`, 미공개 시 `/releases/latest`)
+- [ ] status bar의 What's new 링크 → 외부 브라우저로 GitHub 릴리즈 페이지 (`releases/tag/v<version>`; 태그 미공개 시 GitHub 가 친화적 "release not found" 페이지를 표시 — 별도 fallback 호출 없음)
 - [ ] status bar의 × 닫기 → status bar 사라짐, 해당 버전은 재표시 안 됨 (새 버전 나오면 다시 표시) ✅
 - [ ] 앱을 24시간 이상 켜두면 백그라운드 재체크 ✅
 

@@ -207,3 +207,112 @@ test('pickInitialViewMode: rejects non-string saved values (objects, numbers)', 
   assert.equal(helpers.pickInitialViewMode({}, 'split'), 'split');
   assert.equal(helpers.pickInitialViewMode([], 'split'), 'split');
 });
+
+// ---------------- isSafeVersionToken ----------------
+// Contract mirrors `is_safe_version_token` in src-tauri/src/commands.rs.
+// Both sides validate the updater feed's version token before splicing
+// it into the GitHub release URL — JS guards the dev-server / e2e path
+// where Tauri isn't around to enforce it, Rust guards the IPC boundary.
+// If they drift, a malformed version could escape the markdown-desk repo
+// URL space (`releases/tag/v<...>`) on one side but not the other.
+
+test('isSafeVersionToken: accepts CalVer-shaped tokens', () => {
+  assert.equal(helpers.isSafeVersionToken('26.5.1'), true);
+  assert.equal(helpers.isSafeVersionToken('26.5.10'), true);
+  assert.equal(helpers.isSafeVersionToken('1.0.0'), true);
+});
+
+test('isSafeVersionToken: rejects non-strings', () => {
+  // The token can arrive from a Tauri command (always String) or the JS
+  // banner-API (might be misused). Non-strings must fail closed.
+  assert.equal(helpers.isSafeVersionToken(null), false);
+  assert.equal(helpers.isSafeVersionToken(undefined), false);
+  assert.equal(helpers.isSafeVersionToken(26.51), false);
+  assert.equal(helpers.isSafeVersionToken({}), false);
+});
+
+test('isSafeVersionToken: rejects empty and overlong strings', () => {
+  assert.equal(helpers.isSafeVersionToken(''), false);
+  // Boundary: 32 chars must pass, 33 must fail — pinned the same way Rust does.
+  assert.equal(helpers.isSafeVersionToken('1'.repeat(32)), true);
+  assert.equal(helpers.isSafeVersionToken('1'.repeat(33)), false);
+});
+
+test('isSafeVersionToken: rejects letters / hyphens / shell metacharacters', () => {
+  assert.equal(helpers.isSafeVersionToken('v26.5.1'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1a'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1-rc1'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1;ls'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1 && rm -rf'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1`whoami`'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1$(id)'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1|cat'), false);
+});
+
+test('isSafeVersionToken: rejects path-traversal payloads', () => {
+  assert.equal(helpers.isSafeVersionToken('../etc/passwd'), false);
+  assert.equal(helpers.isSafeVersionToken('26.5.1/extra'), false);
+});
+
+test('isSafeVersionToken: rejects dot-only and partial-dot inputs', () => {
+  // These were a gap in the previous `^[0-9.]+$` regex — they're allowed
+  // characters but not CalVer-shaped (no digits or empty segments).
+  assert.equal(helpers.isSafeVersionToken('.'), false);
+  assert.equal(helpers.isSafeVersionToken('..'), false);
+  assert.equal(helpers.isSafeVersionToken('...'), false);
+  assert.equal(helpers.isSafeVersionToken('.5'), false);
+  assert.equal(helpers.isSafeVersionToken('5.'), false);
+  assert.equal(helpers.isSafeVersionToken('0..0'), false);
+  assert.equal(helpers.isSafeVersionToken('.'.repeat(32)), false);
+});
+
+test('isSafeVersionToken: caps segment count at six', () => {
+  assert.equal(helpers.isSafeVersionToken('1.2.3.4.5.6'), true);
+  assert.equal(helpers.isSafeVersionToken('1.2.3.4.5.6.7'), false);
+});
+
+test('isSafeVersionToken: rejects Unicode digit categories', () => {
+  // `\d` in the JS regex (with no `u` flag) only matches ASCII 0-9, mirroring
+  // Rust's `is_ascii_digit`. A future refactor that adds the `u` flag or
+  // switches to `\p{Nd}` would silently widen the accept set to include
+  // Arabic-Indic ٠١٢ and fullwidth １２３ — those would splice into the
+  // GitHub path and either 404 or obscure the audit trail. Pin the
+  // rejection here.
+  assert.equal(helpers.isSafeVersionToken('٠.١.٢'), false);
+  assert.equal(helpers.isSafeVersionToken('１.２.３'), false);
+});
+
+// ---------------- buildReleaseUrl ----------------
+// Contract: produce the GitHub release-tag URL for a validated version, or
+// return null when the version fails the same whitelist. Centralizing
+// the construction makes the regression surface a single function instead
+// of every banner-href callsite spreading the format string.
+
+test('buildReleaseUrl: returns the canonical tag URL for a valid version', () => {
+  assert.equal(
+    helpers.buildReleaseUrl('26.5.1'),
+    'https://github.com/jhrepo/markdown-desk/releases/tag/v26.5.1'
+  );
+});
+
+test('buildReleaseUrl: returns null for any version isSafeVersionToken rejects', () => {
+  // Centralized rejection means callers don't have to remember to validate;
+  // they can null-check the return value uniformly.
+  assert.equal(helpers.buildReleaseUrl(''), null);
+  assert.equal(helpers.buildReleaseUrl('.'), null);
+  assert.equal(helpers.buildReleaseUrl('v26.5.1'), null);
+  assert.equal(helpers.buildReleaseUrl('26.5.1;ls'), null);
+  assert.equal(helpers.buildReleaseUrl('../etc/passwd'), null);
+  assert.equal(helpers.buildReleaseUrl(null), null);
+  assert.equal(helpers.buildReleaseUrl(undefined), null);
+});
+
+test('buildReleaseUrl: matches the Rust build_release_url contract', () => {
+  // The Rust side asserts the same prefix + version concat. If either side
+  // drifts, the link in the banner stops matching the URL the IPC opens.
+  const version = '99.1.2';
+  assert.equal(
+    helpers.buildReleaseUrl(version),
+    `https://github.com/jhrepo/markdown-desk/releases/tag/v${version}`
+  );
+});

@@ -444,67 +444,88 @@ pub fn set_update_title_suffix(app: tauri::AppHandle, suffix: String) -> Result<
     }
 }
 
-/// Accept only CalVer-shaped tokens (digits and dots). Markdown Desk ships
-/// pure numeric `YY.M.MICRO` versions (no prerelease suffix), so anything
-/// non-digit is rejected — this keeps the value safe to splice into the URL
-/// we hand to /usr/bin/open.
+/// Accept only CalVer-shaped tokens (digits separated by dots, no empty
+/// segments). Markdown Desk ships pure numeric `YY.M.MICRO` versions (no
+/// prerelease suffix); the cap of six segments leaves room for a future
+/// monotonic-build suffix without widening the accept set indefinitely.
+/// Rejecting empty segments closes the dot-only / leading-dot / trailing-dot
+/// holes the simpler `^[0-9.]+$` regex left open.
 pub(crate) fn is_safe_version_token(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 32
-        && version
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.')
+    // `str::len` returns byte length, not char count. Capping bytes is the
+    // correct guard for the IPC boundary: the URL gets spliced into a
+    // GitHub path component, so we care about the byte budget of the
+    // request, not display-width. Combined with the ASCII-digit check
+    // below, multi-byte inputs end up rejected on segment content anyway.
+    if version.is_empty() || version.len() > 32 {
+        return false;
+    }
+    let mut segments = 0usize;
+    for segment in version.split('.') {
+        segments += 1;
+        if segments > 6 {
+            return false;
+        }
+        if segment.is_empty() {
+            return false;
+        }
+        if !segment.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) const RELEASE_TAG_URL_PREFIX: &str =
     "https://github.com/jhrepo/markdown-desk/releases/tag/v";
-pub(crate) const RELEASE_LATEST_URL: &str =
-    "https://github.com/jhrepo/markdown-desk/releases/latest";
 
-/// HEAD-check the tag URL and return it if reachable (HTTP 200); otherwise
-/// fall back to /releases/latest. Uses /usr/bin/curl to avoid pulling a
-/// new Rust HTTP dependency just for one probe.
-fn resolve_release_url(version: &str) -> String {
-    let tag_url = format!("{}{}", RELEASE_TAG_URL_PREFIX, version);
-    let probe = std::process::Command::new("/usr/bin/curl")
-        .args([
-            "-sIL",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--max-time",
-            "5",
-            &tag_url,
-        ])
-        .output();
-    match probe {
-        Ok(out) => {
-            let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if code == "200" {
-                tag_url
-            } else {
-                RELEASE_LATEST_URL.to_string()
-            }
-        }
-        Err(_) => RELEASE_LATEST_URL.to_string(),
-    }
+/// Build the GitHub release-tag URL for a validated version token. The
+/// version must already have passed `is_safe_version_token`; we still keep
+/// the check at the IPC boundary as a belt-and-braces guard.
+pub(crate) fn build_release_url(version: &str) -> String {
+    format!("{}{}", RELEASE_TAG_URL_PREFIX, version)
 }
 
 /// Open the GitHub release page for the given version in the user's default
-/// browser. Falls back to /releases/latest if the tagged page isn't yet
-/// reachable (e.g. transient CDN gap right after a release).
+/// browser. We open the tag URL directly — GitHub serves a friendly
+/// "release not found" page if the tag hasn't propagated yet, which is a
+/// cheaper failure mode than blocking the IPC worker on a synchronous HTTP
+/// probe (the previous design held a sync `curl --max-time 5` on a Tauri
+/// worker thread and queued other sync IPCs behind it).
+///
+/// macOS `open` finishes its argv dispatch within milliseconds and exits,
+/// but a `Child` dropped without `wait()` leaves the slot in the OS process
+/// table until the parent reaps it. The previous `.map(|_| ())` did exactly
+/// that — in a long-lived session where the user clicks "What's new"
+/// repeatedly, those entries accumulate. Reap on a detached thread so the
+/// IPC return stays non-blocking but no entry leaks.
 #[tauri::command]
 pub fn open_release_page(version: String) -> Result<(), String> {
     if !is_safe_version_token(&version) {
         return Err("invalid version format".to_string());
     }
-    let url = resolve_release_url(&version);
-    std::process::Command::new("/usr/bin/open")
+    let url = build_release_url(&version);
+    let child = std::process::Command::new("/usr/bin/open")
         .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        // Surface a static message instead of the OS error string. The
+        // raw `e.to_string()` would carry "Permission denied (os error
+        // 13)" / file-path fragments out through the IPC return into the
+        // renderer's console — small host-environment leak that's also
+        // useless to the user. UX impact is nil; the click already opens
+        // the browser when it succeeds. dbg_log 만 호출 측에 보존해
+        // 개발 빌드 트라이지에서 원본 OS 에러를 확인할 수 있게 한다.
+        .map_err(|e| {
+            dbg_log!("[open_release_page] spawn /usr/bin/open failed: {}", e);
+            "failed to open release page".to_string()
+        })?;
+    std::thread::spawn(move || {
+        let mut c = child;
+        let _ = c.wait();
+    });
+    Ok(())
 }
 
 pub(crate) fn escape_js(s: &str) -> String {
@@ -1513,10 +1534,44 @@ mod tests {
         assert!(!is_safe_version_token(&long));
     }
 
-    // --- release URL constants ---
+    #[test]
+    fn is_safe_version_token_length_boundary_is_exactly_32() {
+        // 32 chars must pass, 33 must fail — pin the boundary so a future
+        // edit to the length cap can't silently widen it.
+        let ok = "1".repeat(32);
+        let bad = "1".repeat(33);
+        assert!(is_safe_version_token(&ok));
+        assert!(!is_safe_version_token(&bad));
+    }
 
     #[test]
-    fn release_url_constants_point_at_correct_repo() {
+    fn is_safe_version_token_rejects_dot_only_and_partial_dots() {
+        // The previous regex `^[0-9.]+$` accepted any string of digits-or-dots,
+        // including ones with no digits at all or with empty segments. None of
+        // those are CalVer-shaped; rejecting them keeps the accept set tight
+        // and the URL we build with this token unambiguous.
+        assert!(!is_safe_version_token("."), "single dot must be rejected");
+        assert!(!is_safe_version_token(".."), "two dots must be rejected");
+        assert!(!is_safe_version_token("..."), "three dots must be rejected");
+        assert!(!is_safe_version_token(".5"), "leading dot must be rejected");
+        assert!(!is_safe_version_token("5."), "trailing dot must be rejected");
+        assert!(!is_safe_version_token("0..0"), "empty segment must be rejected");
+        assert!(!is_safe_version_token(&".".repeat(32)), "all-dot string must be rejected");
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_more_than_six_segments() {
+        // CalVer YY.M.MICRO is three segments; cap at six so a misbehaving
+        // updater feed can't expand the accept set indefinitely (each extra
+        // segment is one more place for an unexpected URL shape to slip in).
+        assert!(is_safe_version_token("1.2.3.4.5.6"));
+        assert!(!is_safe_version_token("1.2.3.4.5.6.7"));
+    }
+
+    // --- release URL builder ---
+
+    #[test]
+    fn release_url_prefix_points_at_correct_repo() {
         // bridge.js builds the same tag URL client-side and the e2e spec
         // asserts on it. If the repo path drifts here without a matching
         // bridge.js update, the link in the banner stops matching reality.
@@ -1524,9 +1579,77 @@ mod tests {
             RELEASE_TAG_URL_PREFIX,
             "https://github.com/jhrepo/markdown-desk/releases/tag/v"
         );
+    }
+
+    #[test]
+    fn build_release_url_appends_version() {
         assert_eq!(
-            RELEASE_LATEST_URL,
-            "https://github.com/jhrepo/markdown-desk/releases/latest"
+            build_release_url("26.5.1"),
+            "https://github.com/jhrepo/markdown-desk/releases/tag/v26.5.1"
         );
+    }
+
+    #[test]
+    fn build_release_url_matches_bridge_js_template() {
+        // bridge.js renders the same URL into the banner href; e2e asserts
+        // they match. Guard against either side drifting independently.
+        let version = "99.1.2";
+        let rust_url = build_release_url(version);
+        let bridge_url = format!(
+            "https://github.com/jhrepo/markdown-desk/releases/tag/v{}",
+            version
+        );
+        assert_eq!(rust_url, bridge_url);
+    }
+
+    #[test]
+    fn build_release_url_zero_padded_versions() {
+        // Sanity: trailing-zero versions must not be normalized away.
+        assert_eq!(
+            build_release_url("1.0.0"),
+            "https://github.com/jhrepo/markdown-desk/releases/tag/v1.0.0"
+        );
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_unicode_digits() {
+        // `is_ascii_digit` rejects Unicode digit categories so a future
+        // refactor that swaps to `is_numeric` (which would accept ٠١٢ and
+        // fullwidth １.２.３) gets caught here. Splicing those into the
+        // GitHub path would yield 404 at best, and obscures the audit
+        // trail at worst — keep the accept set strictly ASCII.
+        assert!(!is_safe_version_token("٠.١.٢"), "Arabic-Indic digits must be rejected");
+        assert!(!is_safe_version_token("１.２.３"), "fullwidth digits must be rejected");
+        assert!(!is_safe_version_token("²⁶.⁵.¹"), "superscript digits must be rejected");
+    }
+
+    // --- open_release_page boundary tests ---
+    //
+    // The version-token whitelist gets unit-tested above, but the boundary
+    // wiring — `open_release_page` actually consults the whitelist before
+    // spawning — needs its own guard so a refactor that drops the gate
+    // (e.g. moving the check elsewhere and forgetting to keep it here)
+    // gets caught. The happy-path `open_release_page` itself spawns
+    // `/usr/bin/open` which isn't available in CI sandboxes, so we only
+    // exercise the rejection branch where no process gets spawned.
+
+    #[test]
+    fn open_release_page_rejects_invalid_version() {
+        for bad in [
+            "26.5.1;ls",
+            "../etc/passwd",
+            "26.5.1`whoami`",
+            "v26.5.1",
+            "",
+            "..",
+            "٠.١.٢",
+        ] {
+            let err = open_release_page(bad.to_string())
+                .expect_err(&format!("open_release_page accepted invalid token: {:?}", bad));
+            assert_eq!(
+                err, "invalid version format",
+                "rejection message must be the static guard string, not an OS leak"
+            );
+        }
     }
 }

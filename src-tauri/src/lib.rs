@@ -502,6 +502,403 @@ mod bridge_script_tests {
         assert!(s.contains("hardReload()"), "Cmd+R must call hardReload");
     }
 
+    // --- Live-reload stamping race guards ------------------------------
+    // These pin the cold-start fix from this change. Without them,
+    // bridgeStampTabPath's `firstSeen` flag could be deleted by a future
+    // edit (it's terse), the live-reload race would silently come back,
+    // and the e2e regression would only surface from a fresh user session.
+
+    #[test]
+    fn stamp_tab_path_gates_queue_on_first_seen_only() {
+        let s = bridge_js();
+        // The flag itself.
+        assert!(s.contains("firstSeen"), "firstSeen guard missing in bridgeStampTabPath");
+        // And the seen-id tracker that backs it.
+        assert!(s.contains("seenTabIds"), "seenTabIds tracker missing");
+    }
+
+    // Extract the body of a top-level `function NAME() { … }` from
+    // bridge.js so single-function invariants (forEach order, branch
+    // structure) can be asserted without matching unrelated text elsewhere
+    // in the file. `pub(super)` so other test modules in this file (e.g.
+    // bridge_update_check_tests) can share the same robust slicer.
+    //
+    // The brace-depth count skips characters inside string literals,
+    // template literals, and line/block comments so a future edit that
+    // adds `'{}'.repeat(...)`, `/^\{$/`, `` `${x}` ``, or just a comment
+    // line like `// closing }` can't desync the slicer. Without this
+    // guard the count would silently land mid-token and the assertions
+    // below would either false-fail or — worse — false-pass against an
+    // empty slice.
+    pub(super) fn slice_fn_body<'a>(s: &'a str, name: &str) -> &'a str {
+        let header = format!("function {}(", name);
+        let start = s
+            .find(&header)
+            .unwrap_or_else(|| panic!("function {} not found in bridge.js", name));
+        let open_rel = s[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("function {} body open brace missing", name));
+        let open = start + open_rel + 1;
+        let bytes = s.as_bytes();
+
+        #[derive(PartialEq)]
+        enum Mode {
+            Code,
+            Single,
+            Double,
+            Tmpl,
+            Line,
+            Block,
+        }
+
+        let mut mode = Mode::Code;
+        let mut depth: usize = 1;
+        let mut i = open;
+        while i < bytes.len() && depth > 0 {
+            let c = bytes[i];
+            match mode {
+                Mode::Code => {
+                    // Comment openers take priority over the division
+                    // operator — bridge.js has no regex-literal slot
+                    // inside any function we slice, so we can treat `/`
+                    // as comment-only without false positives.
+                    if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                        mode = Mode::Line;
+                        i += 2;
+                        continue;
+                    }
+                    if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                        mode = Mode::Block;
+                        i += 2;
+                        continue;
+                    }
+                    if c == b'\'' {
+                        mode = Mode::Single;
+                    } else if c == b'"' {
+                        mode = Mode::Double;
+                    } else if c == b'`' {
+                        mode = Mode::Tmpl;
+                    } else if c == b'{' {
+                        depth += 1;
+                    } else if c == b'}' {
+                        depth -= 1;
+                    }
+                }
+                Mode::Single => {
+                    if c == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == b'\'' {
+                        mode = Mode::Code;
+                    }
+                }
+                Mode::Double => {
+                    if c == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == b'"' {
+                        mode = Mode::Code;
+                    }
+                }
+                Mode::Tmpl => {
+                    // We don't model `${ … }` interpolation: bridge.js
+                    // doesn't use template literals inside any sliced
+                    // body today. If that changes, the assertion below
+                    // will trip first and the slicer can be upgraded.
+                    if c == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == b'`' {
+                        mode = Mode::Code;
+                    }
+                }
+                Mode::Line => {
+                    if c == b'\n' {
+                        mode = Mode::Code;
+                    }
+                }
+                Mode::Block => {
+                    if c == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                        mode = Mode::Code;
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        assert!(
+            depth == 0,
+            "function {}: brace depth never reached zero — unbalanced braces or unterminated string/comment",
+            name
+        );
+        &s[open..i - 1]
+    }
+
+    #[test]
+    fn restamp_all_tabs_marks_pre_existing_tabs_seen_first() {
+        let s = bridge_js();
+        // bridgeRestampAllTabs must register every existing id in
+        // seenTabIds BEFORE running bridgeStampTabPath on them, otherwise
+        // a queued path could leak into the Welcome tab during a host
+        // re-render that happens to run before MO is installed. A future
+        // refactor that fuses the two forEach passes into one would silently
+        // resurrect the race (the marking would run interleaved with
+        // stamping instead of strictly before it).
+        let body = slice_fn_body(&s, "bridgeRestampAllTabs");
+        let count = body.matches(".forEach(").count();
+        assert!(
+            count >= 2,
+            "bridgeRestampAllTabs must use two forEach passes (mark, then stamp); found {}",
+            count
+        );
+        let first_idx = body.find(".forEach(").expect("first forEach");
+        let second_off = body[first_idx + 1..]
+            .find(".forEach(")
+            .expect("second forEach")
+            + first_idx
+            + 1;
+        let first_pass = &body[..second_off];
+        let second_pass = &body[second_off..];
+        assert!(
+            first_pass.contains("seenTabIds[id] = 1"),
+            "first forEach must mark seenTabIds before the stamping pass"
+        );
+        assert!(
+            second_pass.contains("bridgeStampTabPath"),
+            "second forEach must invoke bridgeStampTabPath"
+        );
+    }
+
+    #[test]
+    fn gc_tab_paths_only_drops_stale_ids() {
+        let s = bridge_js();
+        // The auto-recovery basename heuristic was removed: a user-driven
+        // tab rename (Markdown-Viewer's renameTab() overwrites tab.title)
+        // would otherwise trip the title/path mismatch branch and the
+        // sidecar entry would be permanently dropped, breaking live-reload
+        // for that tab until it's closed and re-opened. Stale-id GC alone
+        // is enough — leaked entries from closed tabs still get pruned.
+        let body = slice_fn_body(&s, "bridgeGcTabPaths");
+        assert!(
+            !body.contains("titleBase") && !body.contains("pathBase"),
+            "bridgeGcTabPaths must not compare title/path basenames — user renames must not poison the sidecar"
+        );
+        // The one and only delete must be guarded by the stale-id check.
+        // Whitespace-strip both sides so a future formatter inserting
+        // spaces (`delete map [id]`, `delete map[ id ]`) doesn't turn the
+        // grep into a silent false-negative — the invariant is about the
+        // operator + key shape, not column alignment.
+        let normalized: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let delete_count = normalized.matches("deletemap[id]").count();
+        assert_eq!(
+            delete_count, 1,
+            "bridgeGcTabPaths must delete entries exactly once (the stale-id branch); found {}",
+            delete_count
+        );
+        assert!(
+            body.contains("if (!t)") || body.contains("if (!byId[id])"),
+            "bridgeGcTabPaths must gate the delete on a stale-id check"
+        );
+    }
+
+    // Mirror prepare-frontend.sh's sed: strip every line from
+    // `@dev-hook-start` through the matching `@dev-hook-end` inclusive.
+    // Generic over file content so the same contract can be re-checked
+    // against bridge.js, bridge-helpers.js, and toc.js — every script the
+    // build pipeline runs the sed on.
+    //
+    // Enforces stack-strict marker pairing: a nested `@dev-hook-start`
+    // inside an already-open block, or an `@dev-hook-end` without a
+    // matching opener, panics. sed's address range silently swallows
+    // those mistakes (closing on the first `@dev-hook-end` regardless
+    // of nesting) and the surrounding dev block would either leak its
+    // tail into release or strip live code. Panicking here turns that
+    // into a test failure instead.
+    fn release_strip(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut skipping = false;
+        for (line_no, line) in raw.lines().enumerate() {
+            if line.contains("@dev-hook-start") {
+                assert!(
+                    !skipping,
+                    "nested @dev-hook-start at line {} — sed would close on the inner end and leak the outer block's tail",
+                    line_no + 1
+                );
+                skipping = true;
+                continue;
+            }
+            if line.contains("@dev-hook-end") {
+                assert!(
+                    skipping,
+                    "@dev-hook-end at line {} without a matching @dev-hook-start — orphan marker",
+                    line_no + 1
+                );
+                skipping = false;
+                continue;
+            }
+            if !skipping {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        assert!(
+            !skipping,
+            "@dev-hook-start opened but never closed — sed would strip to EOF"
+        );
+        out
+    }
+
+    // Discover every dev-only namespace token in the raw source so the
+    // strip assertion below is self-updating: a new `__mdDesk*Internals`
+    // gets picked up automatically as long as it lives inside a dev-hook
+    // block. Constrained to the `__mdDesk` project prefix so unrelated
+    // PascalCase `*Internals` identifiers (e.g. a future dependency's
+    // `WebSocketInternals`) don't trigger false-fails — the broader
+    // `contains("Internals")` check used to do exactly that.
+    fn extract_dev_namespaces(raw: &str) -> Vec<String> {
+        let bytes = raw.as_bytes();
+        let mut out = Vec::new();
+        let needle = "__mdDesk";
+        let mut start = 0;
+        while let Some(rel) = raw[start..].find(needle) {
+            let idx = start + rel;
+            let mut end = idx + needle.len();
+            while end < bytes.len() {
+                let c = bytes[end];
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            let tok = &raw[idx..end];
+            if tok.ends_with("Internals") {
+                let s = tok.to_string();
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            start = end.max(idx + 1);
+        }
+        out
+    }
+
+    fn read_script(name: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e))
+    }
+
+    // Every script that ships into dist/ goes through the same sed strip.
+    // Keep this list in sync with prepare-frontend.sh's glob — the
+    // `prepare_frontend_sh_strips_every_bridge_owned_script` test below
+    // catches drift.
+    const BRIDGE_OWNED_SCRIPTS: &[&str] = &["bridge.js", "bridge-helpers.js", "toc.js"];
+
+    #[test]
+    fn dev_hook_markers_balance_in_every_bridge_owned_script() {
+        // A structural invariant: every `@dev-hook-start` must be paired
+        // with an `@dev-hook-end`. An unbalanced count means sed's
+        // address range would either swallow live code (start with no
+        // end) or leave a dev block in the release (end without start).
+        // Checked on the raw source so a regression shows up before the
+        // strip runs.
+        for name in BRIDGE_OWNED_SCRIPTS {
+            let raw = read_script(name);
+            let starts = raw.matches("@dev-hook-start").count();
+            let ends = raw.matches("@dev-hook-end").count();
+            assert_eq!(
+                starts, ends,
+                "{}: @dev-hook-start ({}) and @dev-hook-end ({}) must pair",
+                name, starts, ends
+            );
+        }
+    }
+
+    #[test]
+    fn release_strip_removes_dev_only_internals_from_every_bridge_owned_script() {
+        // The original guard covered bridge.js only. toc.js also defines a
+        // `__mdDeskTocInternals` surface inside a dev-hook block, so if a
+        // future edit drops toc.js from the sed glob or corrupts its
+        // markers the namespace would silently leak into the release
+        // WebView. Iterate over every bridge-owned script to keep the
+        // invariant uniform.
+        for name in BRIDGE_OWNED_SCRIPTS {
+            let raw = read_script(name);
+            let stripped = release_strip(&raw);
+            assert!(
+                !stripped.contains("@dev-hook-start"),
+                "{}: @dev-hook-start marker leaked into release output",
+                name
+            );
+            assert!(
+                !stripped.contains("@dev-hook-end"),
+                "{}: @dev-hook-end marker leaked into release output",
+                name
+            );
+            // Every dev-only namespace is `__mdDesk*Internals`
+            // (__mdDeskUpdateInternals, __mdDeskZoomInternals,
+            // __mdDeskViewModeInternals, __mdDeskTocInternals). Extract
+            // the actual identifiers from the raw source so the check
+            // stays narrow — a third-party `WebSocketInternals` or
+            // similar identifier doesn't accidentally fail the test.
+            // Tauri's UPPER_SNAKE __TAURI_INTERNALS__ is unaffected (it
+            // lacks the `__mdDesk` prefix). If a script defines no
+            // namespaces at all (e.g. bridge-helpers.js), the loop is
+            // a no-op and the marker assertions above are the gate.
+            for ns in extract_dev_namespaces(&raw) {
+                assert!(
+                    !stripped.contains(ns.as_str()),
+                    "{}: dev namespace {} leaked into release output — dev-hook strip is broken",
+                    name,
+                    ns
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_frontend_sh_strips_every_bridge_owned_script() {
+        // Drift guard: if a new bridge-owned script lands and the sed
+        // glob isn't updated, the strip silently skips it and any
+        // namespace it defines leaks. A whole-file `contains(name)`
+        // assertion isn't enough — every bridge-owned filename shows up
+        // elsewhere in the script (the unconditional `cp` lines, the
+        // version-injection `sed`, the `<script src=...>` injector). A
+        // future PR that drops just the strip loop would still pass.
+        // Anchor on the actual loop line + sed line instead.
+        let raw = read_script("prepare-frontend.sh");
+        let strip_loop = raw
+            .lines()
+            .find(|l| l.trim_start().starts_with("for f in") && l.contains("bridge.js"))
+            .expect("prepare-frontend.sh dev-hook strip `for f in …` loop missing");
+        for name in BRIDGE_OWNED_SCRIPTS {
+            assert!(
+                strip_loop.contains(name),
+                "prepare-frontend.sh strip loop missing {} (loop line: {:?})",
+                name,
+                strip_loop
+            );
+        }
+        // The sed itself must still wrap the canonical sentinel range —
+        // a rename on one side (markers in JS) but not the other (sed
+        // pattern here) breaks the strip without any prior test noticing.
+        let sed_line = raw.lines().find(|l| {
+            l.contains("sed") && l.contains("@dev-hook-start") && l.contains("@dev-hook-end")
+        });
+        assert!(
+            sed_line.is_some(),
+            "prepare-frontend.sh sed line on the @dev-hook sentinel range missing"
+        );
+    }
+
     #[test]
     fn shortcut_handlers_prevent_default_and_stop_propagation() {
         let s = bridge_js();
@@ -614,6 +1011,109 @@ mod bridge_update_check_tests {
         assert!(
             s.contains("'open_release_page'"),
             "open_release_page invoke missing — link will silently no-op"
+        );
+    }
+
+    #[test]
+    fn release_tag_url_prefix_matches_between_js_and_rust() {
+        // Both bridge-helpers.js (banner href) and commands.rs
+        // (open_release_page IPC) hardcode the same GitHub release-tag
+        // URL prefix. Owner or repo rename + single-side update would
+        // make the banner click open a different page than the deep
+        // link reports. Tie the two together: if the Rust constant
+        // changes, this assertion forces the JS literal to follow.
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("bridge-helpers.js");
+        let helpers = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        assert!(
+            helpers.contains(crate::commands::RELEASE_TAG_URL_PREFIX),
+            "bridge-helpers.js RELEASE_TAG_URL_PREFIX literal drifted from commands.rs constant"
+        );
+    }
+
+    #[test]
+    fn show_update_banner_fails_closed_before_constructing_dom() {
+        // The helpers-absent / unsafe-token rejection branches must run
+        // BEFORE any DOM construction so a refactor that reorders the
+        // function body can't accidentally splice a tainted value into
+        // the banner. Function-body slicing keeps the assertion local —
+        // matching unrelated `document.createElement` calls elsewhere
+        // in bridge.js would otherwise mask a regression here.
+        let s = bridge_js();
+        let body = super::bridge_script_tests::slice_fn_body(&s, "showUpdateBanner");
+
+        // Semantic matches rather than exact source strings: a benign
+        // refactor that swaps `if (!helpers || !helpers.buildReleaseUrl)`
+        // for `if (helpers == null || ...)` should not register as a
+        // "branch deleted" — the invariant is "helpers gets null-checked
+        // before DOM construction," not the literal punctuation of the
+        // check. `!helpers` substring catches the negation regardless of
+        // surrounding operator order, and the unsafe-token rejection
+        // gates `releaseUrl` falsiness the same way.
+        let null_check_idx = body
+            .find("!helpers")
+            .expect("helpers null-check (`!helpers`) missing — fail-closed branch deleted");
+        let unsafe_token_idx = body
+            .find("!releaseUrl")
+            .expect("unsafe-token rejection (`!releaseUrl`) missing — fail-closed branch deleted");
+        let first_dom_idx = body
+            .find("document.createElement")
+            .expect("banner construction missing");
+        assert!(
+            null_check_idx < first_dom_idx,
+            "helpers null-check must precede banner DOM construction (was {} >= {})",
+            null_check_idx, first_dom_idx
+        );
+        assert!(
+            unsafe_token_idx < first_dom_idx,
+            "unsafe-token rejection must precede banner DOM construction (was {} >= {})",
+            unsafe_token_idx, first_dom_idx
+        );
+
+        // Defense-in-depth: the click handler that invokes
+        // `open_release_page` must re-validate the token *inside the
+        // handler* — a re-check living outside the lambda would let a
+        // refactor that reaches the IPC through a different code path
+        // bypass the gate. Anchor the slice on both ends so the check
+        // has to land between the addEventListener('click', ...) opener
+        // and the open_release_page invoke.
+        let click_open_idx = body
+            .find("releaseLink.addEventListener('click'")
+            .expect("What's new click handler missing");
+        let invoke_idx = body
+            .find("'open_release_page'")
+            .expect("open_release_page invoke missing");
+        let check_idx = body
+            .find("isSafeVersionToken(version)")
+            .expect("click handler must re-check isSafeVersionToken before the IPC dispatch");
+        assert!(
+            click_open_idx < check_idx && check_idx < invoke_idx,
+            "isSafeVersionToken re-check must sit inside the click handler — between addEventListener('click') ({}) and the open_release_page invoke ({}); found at {}",
+            click_open_idx, invoke_idx, check_idx
+        );
+    }
+
+    #[test]
+    fn banner_validates_version_token_client_side() {
+        let s = bridge_js();
+        // Defense-in-depth: outside Tauri (dev server / e2e Playwright) the
+        // href is followed verbatim, so the same whitelist Rust enforces
+        // at the IPC boundary must run on the JS side before the banner
+        // gets built. The check is now centralized in buildReleaseUrl,
+        // which internally calls isSafeVersionToken and returns null on
+        // rejection — the banner refuses to render when the URL is null.
+        assert!(
+            s.contains("buildReleaseUrl"),
+            "showUpdateBanner must build the release URL via buildReleaseUrl (which validates with isSafeVersionToken)"
+        );
+        // And the null-check on the result — without it, an unsafe token
+        // would still let the banner render with a null href.
+        assert!(
+            s.contains("if (!releaseUrl)"),
+            "showUpdateBanner must abort when buildReleaseUrl rejects the version token"
         );
     }
 

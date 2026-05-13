@@ -29,10 +29,36 @@ async function activeMode() {
   });
 }
 
+async function tabCount() {
+  return browser.execute(
+    () => document.querySelectorAll('#tab-list .tab-item').length
+  );
+}
+
+// `.tab-new-btn` 셀렉터가 드리프트하거나 버튼이 hidden 상태로 회귀하면
+// click 합성이 silent miss 되고, 현재 탭의 viewMode 가 그대로 흘러가
+// 잘못된 단언을 통과시킨다. 탭 수 증가를 명시적으로 가드해 회귀 시
+// loud-fail 시킨다.
+async function clickNewTabAndWait() {
+  const prev = await tabCount();
+  const newTabBtn = await $('.tab-new-btn');
+  await expect(newTabBtn).toBeExisting();
+  await newTabBtn.click();
+  await browser.waitUntil(async () => (await tabCount()) >= prev + 1, {
+    timeout: 3000,
+    timeoutMsg: 'new tab did not appear after clicking .tab-new-btn',
+  });
+  // applyLastModeIfNeeded 는 setTimeout(0) 으로 mount 감지 후 click 합성.
+  await browser.pause(150);
+}
+
 describe('마지막 viewMode 기억', () => {
-  before(async () => {
+  before(async function () {
+    // dev-hook 이 없으면 release 빌드 — 이 spec 은 dev-hook 으로만
+    // savedMode 를 조작하므로 release smoke 에서는 통째로 의미가 없다.
+    // hard fail 대신 skip 하여 false-negative 를 막는다.
     const exposed = await browser.execute(() => !!window.__mdDeskViewModeInternals);
-    expect(exposed).toBe(true);
+    if (!exposed) this.skip();
   });
 
   beforeEach(clearLastMode);
@@ -78,12 +104,7 @@ describe('마지막 viewMode 기억', () => {
     // 사전 조건: 사용자가 editor 를 선택했다고 가정.
     await browser.execute(() => window.__mdDeskViewModeInternals.setSavedMode('editor'));
 
-    // 새 탭 생성: 호스트의 New Tab 버튼을 클릭.
-    const newTabBtn = await $('.tab-new-btn');
-    await expect(newTabBtn).toBeExisting();
-
-    await newTabBtn.click();
-    await browser.pause(200); // applyLastModeIfNeeded 는 setTimeout(0) 후 detect
+    await clickNewTabAndWait();
 
     const mode = await activeMode();
     expect(mode).toBe('editor');
@@ -91,11 +112,8 @@ describe('마지막 viewMode 기억', () => {
 
   it("saved 가 'preview' 면 신규 탭에 preview 모드를 적용한다", async () => {
     await browser.execute(() => window.__mdDeskViewModeInternals.setSavedMode('preview'));
-    const newTabBtn = await $('.tab-new-btn');
-    await expect(newTabBtn).toBeExisting();
 
-    await newTabBtn.click();
-    await browser.pause(200);
+    await clickNewTabAndWait();
 
     const mode = await activeMode();
     expect(mode).toBe('preview');
@@ -105,11 +123,8 @@ describe('마지막 viewMode 기억', () => {
     await browser.execute(() => {
       window.__mdDeskViewModeInternals.setSavedMode('not-a-real-mode');
     });
-    const newTabBtn = await $('.tab-new-btn');
-    await expect(newTabBtn).toBeExisting();
 
-    await newTabBtn.click();
-    await browser.pause(200);
+    await clickNewTabAndWait();
 
     const mode = await activeMode();
     expect(mode).toBe('split');
@@ -126,7 +141,16 @@ describe('마지막 viewMode 기억', () => {
       tabs[0].click(); // tab1 을 active 로 전환 (저장된 viewMode 가 일단 복원됨)
       return tabs[0].getAttribute('data-tab-id');
     });
-    if (!setup) return this.skip();
+    // In e2e the host always renders at least one tab, so `setup === null`
+    // is unreachable in practice. Fail loudly instead of silently passing
+    // — if the host's initial paint ever stops rendering the first tab,
+    // we want to see the regression on the test report rather than ship a
+    // green build that exercised no assertions in this case. expect-webdriverio
+    // doesn't accept a custom message as a second arg, so throw explicitly.
+    if (setup === null) {
+      throw new Error('host failed to render an initial tab — viewMode invariant cannot be exercised');
+    }
+    expect(setup).not.toBeNull();
     await browser.pause(150);
     // 이제 tab1 이 active 이므로 split 토글 클릭은 tab1.viewMode 를 split 으로 덮어쓴다.
     await browser.execute(() => {
@@ -137,11 +161,7 @@ describe('마지막 viewMode 기억', () => {
     expect(await activeMode()).toBe('split');
 
     await browser.execute(() => window.__mdDeskViewModeInternals.setSavedMode('editor'));
-    const newTabBtn = await $('.tab-new-btn');
-    await expect(newTabBtn).toBeExisting();
-
-    await newTabBtn.click();
-    await browser.pause(200);
+    await clickNewTabAndWait();
     expect(await activeMode()).toBe('editor');
 
     // 탭1 로 복귀.
@@ -153,5 +173,29 @@ describe('마지막 viewMode 기억', () => {
 
     // 탭1 의 viewMode 가 'split' 으로 복원되어야 한다.
     expect(await activeMode()).toBe('split');
+  });
+
+  it('mobile view-mode 버튼(.mobile-view-mode-btn[data-mode]) 클릭도 저장 경로를 탄다', async () => {
+    // bridge.js 의 capture-phase click 리스너는
+    // `.view-toggle-btn, .mobile-view-mode-btn` 둘 다 매치하지만, desktop
+    // e2e 환경에서는 mobile 토글이 hidden 상태라 그 셀렉터 경로가 자연
+    // 실행으로는 안 돈다. 결과: 둘 중 한쪽 셀렉터가 회귀해도 다른 쪽
+    // 케이스가 silent 로 통과해 버린다. document-level capture 리스너는
+    // hidden 요소여도 발화하므로, 합성한 mobile-view-mode-btn 을 잠시
+    // 끼워 넣어 selector 자체의 회귀를 가드한다.
+    const stored = await browser.execute(() => {
+      window.__mdDeskViewModeInternals.clearSavedMode();
+      const btn = document.createElement('button');
+      btn.className = 'mobile-view-mode-btn';
+      btn.setAttribute('data-mode', 'preview');
+      document.body.appendChild(btn);
+      try {
+        btn.click();
+      } finally {
+        btn.remove();
+      }
+      return window.__mdDeskViewModeInternals.getSavedMode();
+    });
+    expect(stored).toBe('preview');
   });
 });

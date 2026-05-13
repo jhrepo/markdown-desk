@@ -21,18 +21,25 @@
   // map past localStorage's quota, at which point bridgeSaveTabPaths fails
   // silently and the watcher loses path matching for *all* tabs. Same failure
   // class as the original title-vs-path bug (silent + scoped to a known set).
+  //
+  // The earlier title-vs-path basename heuristic for auto-recovering
+  // poisoned entries was removed: Markdown-Viewer's renameTab() lets the
+  // user overwrite tab.title freely, so basename mismatch is the *normal*
+  // state after a rename. Dropping the entry there would permanently break
+  // live-reload for that tab until it's closed and re-opened. The
+  // first-seen gate in bridgeStampTabPath already prevents fresh
+  // poisoning, so stale-id GC is enough on its own.
   function bridgeGcTabPaths(map) {
-    var liveIds;
+    var liveTabs;
     try {
-      liveIds = JSON.parse(localStorage.getItem('markdownViewerTabs') || '[]')
-        .map(function(t) { return t && t.id; })
-        .filter(Boolean);
+      liveTabs = JSON.parse(localStorage.getItem('markdownViewerTabs') || '[]');
     } catch (_) { return false; }
-    var liveSet = Object.create(null);
-    liveIds.forEach(function(id) { liveSet[id] = 1; });
+    var byId = Object.create(null);
+    liveTabs.forEach(function(t) { if (t && t.id) byId[t.id] = t; });
+
     var changed = false;
     Object.keys(map).forEach(function(id) {
-      if (!liveSet[id]) { delete map[id]; changed = true; }
+      if (!byId[id]) { delete map[id]; changed = true; }
     });
     return changed;
   }
@@ -53,14 +60,33 @@
     // push and silently swap paths between tabs.
     window.__bridgeNextPaths = window.__bridgeNextPaths || [];
 
+    // Tab ids whose first-paint stamp we've already considered. The queue
+    // must only be drained for *new* tab nodes — never for re-renders of
+    // tabs we already know about. Without this guard, renderTabBar's
+    // wholesale `tabList.innerHTML = ''` + re-append means the Welcome
+    // tab (or any pre-existing tab) replays through the MO callback and
+    // can pull the queued path from under the actually-new tab. The
+    // resulting silent path swap leaves the new tab with no data-path,
+    // so the watcher's path-based match never fires and the editor
+    // never refreshes — exactly the live-reload regression that
+    // motivated this gate.
+    var seenTabIds = Object.create(null);
+
     function bridgeStampTabPath(item) {
       if (!item || !item.classList || !item.classList.contains('tab-item')) return;
       var id = item.getAttribute('data-tab-id');
-      // Prefer the per-tab map (covers tab restore + later re-renders); fall
-      // back to the queue only on the very first stamp of a new tab so a
-      // restamp of an existing tab can't accidentally drain the queue.
       var existing = id ? window.__bridgeTabPaths[id] : null;
-      var path = existing || (window.__bridgeNextPaths.length ? window.__bridgeNextPaths.shift() : null);
+      var firstSeen = !!id && !seenTabIds[id];
+      var path;
+      if (existing) {
+        // Re-render of a known tab: restamp from the per-tab map.
+        path = existing;
+      } else if (firstSeen && window.__bridgeNextPaths.length) {
+        // Genuinely new tab (host just created it for a freshly opened
+        // file): pair it with the next queued path.
+        path = window.__bridgeNextPaths.shift();
+      }
+      if (id) seenTabIds[id] = 1;
       if (!path) return;
       item.setAttribute('data-path', path);
       if (id && !existing) {
@@ -71,6 +97,14 @@
 
     function bridgeRestampAllTabs() {
       var items = document.querySelectorAll('#tab-list .tab-item');
+      // Mark all pre-existing tabs as seen BEFORE stamping so none of
+      // them can drain __bridgeNextPaths if the host happens to have
+      // pre-pushed entries (e.g. file-association open arriving before
+      // DOMContentLoaded resolves).
+      items.forEach(function(it) {
+        var id = it.getAttribute('data-tab-id');
+        if (id) seenTabIds[id] = 1;
+      });
       items.forEach(bridgeStampTabPath);
     }
 
@@ -136,16 +170,18 @@
     // Migrate old single-path key to new array key
     var oldPath = localStorage.getItem('markdown-desk-watched-path');
     if (oldPath) {
+      var existing;
       try {
-        var existing = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
-      } catch (e) { var existing = []; }
+        existing = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
+      } catch (e) { existing = []; }
       if (existing.indexOf(oldPath) < 0) existing.push(oldPath);
       localStorage.setItem('markdown-desk-watched-paths', JSON.stringify(existing));
       localStorage.removeItem('markdown-desk-watched-path');
     }
+    var watchedPaths;
     try {
-      var watchedPaths = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
-    } catch (e) { var watchedPaths = []; }
+      watchedPaths = JSON.parse(localStorage.getItem('markdown-desk-watched-paths') || '[]');
+    } catch (e) { watchedPaths = []; }
     if (watchedPaths.length && window.__TAURI_INTERNALS__) {
       watchedPaths.forEach(function(p) {
         window.__TAURI_INTERNALS__.invoke('restore_watcher', { path: p })
@@ -361,6 +397,25 @@
   document.head.appendChild(updateBannerStyle);
 
   function showUpdateBanner(version) {
+    // Same whitelist Rust applies at the IPC boundary — re-check on the JS
+    // side so a malformed updater payload can never splice into the
+    // "What's new" href (which the browser would follow verbatim outside
+    // Tauri, e.g. dev server or e2e Playwright).
+    //
+    // Fail closed: if helpers aren't loaded (test harness, broken bundle)
+    // we can't validate the token and must refuse to render rather than
+    // splice an unchecked value into the DOM. Matches the posture of the
+    // zoom (L914) and view-mode (L1045) entry points elsewhere in this file.
+    var helpers = (typeof window !== 'undefined' && window.__bridgeHelpers) || null;
+    if (!helpers || !helpers.buildReleaseUrl) {
+      console.warn('[updater] showUpdateBanner: bridge helpers unavailable; refusing to render banner');
+      return;
+    }
+    var releaseUrl = helpers.buildReleaseUrl(version);
+    if (!releaseUrl) {
+      console.warn('[updater] showUpdateBanner: rejecting unsafe version token:', version);
+      return;
+    }
     // Tear down any prior banner DOM *without* touching the title — a full
     // hide-dismiss here would clear the suffix we're about to set, and the
     // final Rust invoke would be the clear (C-1).
@@ -377,17 +432,33 @@
 
     // "What's new" link → GitHub release tag page. The href stays a real
     // URL (e2e asserts on it) but clicks are intercepted to route through
-    // a Tauri command that opens the user's default browser and falls
-    // back to /releases/latest if the tagged page hasn't been published yet.
+    // a Tauri command that opens the user's default browser. GitHub itself
+    // serves a friendly "release not found" page if the tag hasn't fully
+    // propagated, so we no longer probe before opening. The URL is built
+    // via the helper above (already validated) so the format-string lives
+    // in exactly one place.
     var releaseLink = document.createElement('a');
     releaseLink.className = UPDATE_BANNER_CLASS + '-release-link';
-    releaseLink.href =
-      'https://github.com/jhrepo/markdown-desk/releases/tag/v' + version;
+    releaseLink.href = releaseUrl;
     releaseLink.target = '_blank';
     releaseLink.rel = 'noopener noreferrer';
     releaseLink.textContent = "What's new";
     releaseLink.addEventListener('click', function(e) {
       if (window.__TAURI_INTERNALS__) {
+        // Defense-in-depth: the Rust side re-validates on every IPC, but
+        // re-checking here keeps the JS surface fail-closed too. Two
+        // guards in one branch:
+        //   1. `helpers.isSafeVersionToken` itself must exist — a future
+        //      partial bundle where helpers loaded but the function got
+        //      tree-shaken would TypeError on call, skipping
+        //      `e.preventDefault()` and letting the anchor's href follow.
+        //   2. The version must pass the whitelist.
+        // preventDefault runs in both rejection paths so the click never
+        // falls through to the browser-follow fallback.
+        if (!helpers.isSafeVersionToken || !helpers.isSafeVersionToken(version)) {
+          e.preventDefault();
+          return;
+        }
         e.preventDefault();
         window.__TAURI_INTERNALS__.invoke('open_release_page', { version: version })
           .catch(function(err) { console.warn('[updater] open_release_page failed:', err); });
@@ -791,10 +862,7 @@
     // Use event delegation on document since bridge.js runs before DOM is ready
     document.addEventListener('click', function(e) {
       if (!findBar || findBar.style.display === 'none') return;
-      // Upstream 364cedd renamed desktop `.view-mode-btn` → `.view-toggle-btn`.
-      // Keep `.view-mode-btn` for any legacy/transitional markup and add the
-      // new class so desktop mode switches still auto-close the find bar.
-      var target = e.target.closest('.tab-item, .view-mode-btn, .view-toggle-btn, .mobile-view-mode-btn');
+      var target = e.target.closest('.tab-item, .view-toggle-btn, .mobile-view-mode-btn');
       if (target) closeFindBar();
     });
   })();
@@ -856,22 +924,43 @@
       currentZoom = helpers.clampZoom(stored, helpers.ZOOM_MIN, helpers.ZOOM_MAX);
     } catch (e) { /* localStorage may be unavailable in some sandboxes */ }
 
+    // Test-only recorder for the set_webview_zoom IPC. Tauri 2 freezes
+    // `__TAURI_INTERNALS__.invoke` as non-writable, so e2e cannot stub it;
+    // instead applyZoom appends to this buffer alongside the real invoke,
+    // and the dev-hook below exposes drain accessors. Stripped at release
+    // build time by prepare-frontend.sh so production never allocates it.
+    // @dev-hook-start
+    var _zoomIpcLog = [];
+    // @dev-hook-end
+
     function applyZoom(level) {
       var next = helpers.clampZoom(level, helpers.ZOOM_MIN, helpers.ZOOM_MAX);
       if (next === currentZoom) return;
       currentZoom = next;
       try { localStorage.setItem(STORAGE_KEY, String(next)); } catch (e) {}
       if (window.__TAURI_INTERNALS__) {
-        window.__TAURI_INTERNALS__.invoke('plugin:webview|set_webview_zoom', { value: next });
+        // @dev-hook-start
+        _zoomIpcLog.push({ name: 'plugin:webview|set_webview_zoom', args: { value: next } });
+        // @dev-hook-end
+        // Surface invoke errors instead of silently dropping them — without
+        // this, a regressed capability or removed plugin would leave
+        // localStorage and the visible zoom level drifting apart with no log.
+        window.__TAURI_INTERNALS__.invoke('plugin:webview|set_webview_zoom', { value: next })
+          .catch(function(err) { console.warn('[zoom] set_webview_zoom failed:', err); });
       }
     }
 
     // Restore the persisted level once the IPC bridge is available. The
     // very first invoke after page load can lose if it races with Tauri's
-    // bootstrap, so we defer one tick.
+    // bootstrap, so we defer one tick. Route through applyZoom so the
+    // clamp + persist + IPC path stays single-sourced — temporarily reset
+    // the in-memory mirror to 1.0 so applyZoom's early-return on equality
+    // doesn't short-circuit the very first restore.
     setTimeout(function() {
       if (currentZoom !== 1.0 && window.__TAURI_INTERNALS__) {
-        window.__TAURI_INTERNALS__.invoke('plugin:webview|set_webview_zoom', { value: currentZoom });
+        var target = currentZoom;
+        currentZoom = 1.0;
+        applyZoom(target);
       }
     }, 0);
 
@@ -957,6 +1046,15 @@
         };
         return handleZoomWheel(ev);
       },
+      // Drain the recorded IPC log. Returns a copy and clears the buffer so
+      // each test asserts only on the calls it triggered. Tauri 2 makes
+      // `__TAURI_INTERNALS__.invoke` non-writable, so this seam replaces
+      // direct stubbing as the regression guard for silent IPC drops.
+      takeIpcLog: function() {
+        var r = _zoomIpcLog.slice();
+        _zoomIpcLog.length = 0;
+        return r;
+      },
     };
     // @dev-hook-end
   })();
@@ -966,13 +1064,12 @@
   // 'split' (Markdown-Viewer/script.js: createTab default + every newTab
   // / reset / welcome callsite). Existing tabs keep their own viewMode,
   // so we only intervene on tabs the user has never seen before — tracked
-  // by id-set diff against localStorage('markdownViewerTabs').
+  // by id-set diff against the rendered tab bar.
   (function() {
     var helpers = (typeof window !== 'undefined' && window.__bridgeHelpers) || null;
     if (!helpers || !helpers.pickInitialViewMode) return;
 
     var STORAGE_KEY = 'markdown-desk-last-view-mode';
-    var TABS_STORAGE_KEY = 'markdownViewerTabs';
 
     function readSavedMode() {
       try { return localStorage.getItem(STORAGE_KEY); } catch (_) { return null; }
@@ -980,13 +1077,23 @@
     function writeSavedMode(mode) {
       try { localStorage.setItem(STORAGE_KEY, mode); } catch (_) {}
     }
+    // Snapshot tab ids straight from the DOM rather than the
+    // localStorage('markdownViewerTabs') sidecar. The host writes that
+    // key synchronously today (Markdown-Viewer/script.js
+    // saveTabsToStorage), so reading either source is correct, but the
+    // DOM is what the MutationObserver below is firing on — so the
+    // values are guaranteed in-sync with the callback's trigger. If a
+    // future host edit deferred the localStorage write (setTimeout 0,
+    // requestIdleCallback, …) the previous reader could have returned
+    // a stale list and applyLastModeIfNeeded would miss the new tab.
     function readTabIds() {
-      try {
-        var arr = JSON.parse(localStorage.getItem(TABS_STORAGE_KEY) || '[]');
-        var ids = Object.create(null);
-        arr.forEach(function(t) { if (t && t.id) ids[t.id] = 1; });
-        return ids;
-      } catch (_) { return Object.create(null); }
+      var ids = Object.create(null);
+      var nodes = document.querySelectorAll('#tab-list .tab-item[data-tab-id]');
+      for (var i = 0; i < nodes.length; i++) {
+        var id = nodes[i].getAttribute('data-tab-id');
+        if (id) ids[id] = 1;
+      }
+      return ids;
     }
 
     // Snapshot of tab ids already known to us. Initialized lazily on
@@ -1005,7 +1112,7 @@
       writeSavedMode(mode);
     }, true);
 
-    function detectAddedTabIds() {
+    function consumeAddedTabIds() {
       var cur = readTabIds();
       if (knownTabIds === null) {
         knownTabIds = cur;
@@ -1020,7 +1127,7 @@
     }
 
     function applyLastModeIfNeeded() {
-      var added = detectAddedTabIds();
+      var added = consumeAddedTabIds();
       if (!added.length) return;
       var saved = readSavedMode();
       var target = helpers.pickInitialViewMode(saved, 'split');
@@ -1038,7 +1145,14 @@
       // closure; the click path also runs saveCurrentTabState() so the
       // new tab's stored viewMode persists across switches.
       var btn = document.querySelector('.view-toggle-btn[data-view-mode="' + target + '"]');
-      if (btn) btn.click();
+      if (btn) {
+        btn.click();
+      } else {
+        // 데스크탑 토글이 보이지 않는 분기(예: editor-only mobile, 셀렉터
+        // rename 회귀)에서 silent no-op 가 되는 걸 가시화. 콘솔에만 남기고
+        // 동작은 그대로(no-op) — 사용자 UX 영향 없음.
+        console.warn('[bridge] last-view-mode skipped: .view-toggle-btn[data-view-mode="' + target + '"] not found');
+      }
     }
 
     // Wait for the host to render the initial tab bar before snapshotting.

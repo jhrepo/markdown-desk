@@ -109,15 +109,23 @@
     fab.type = 'button';
     fab.title = 'Table of contents';
     fab.setAttribute('aria-label', 'Open table of contents');
-    fab.innerHTML = '<i class="bi bi-list-nested"></i>';
+    fab.setAttribute('aria-controls', 'toc-drawer');
+    fab.setAttribute('aria-expanded', 'false');
+    var fabIcon = doc.createElement('i');
+    fabIcon.className = 'bi bi-list-nested';
+    fab.appendChild(fabIcon);
     doc.body.appendChild(fab);
 
     var drawer = doc.createElement('aside');
     drawer.id = 'toc-drawer';
     drawer.setAttribute('aria-label', 'Table of contents');
-    drawer.innerHTML =
-      '<div class="toc-drawer-header">목차</div>' +
-      '<nav class="toc-drawer-list"></nav>';
+    var drawerHeader = doc.createElement('div');
+    drawerHeader.className = 'toc-drawer-header';
+    drawerHeader.textContent = '목차';
+    var drawerList = doc.createElement('nav');
+    drawerList.className = 'toc-drawer-list';
+    drawer.appendChild(drawerHeader);
+    drawer.appendChild(drawerList);
     doc.body.appendChild(drawer);
 
     function realign() {
@@ -162,17 +170,21 @@
     // .content-container without changing sizes immediately; poll once
     // after the CSS transition settles. Not RAF-throttled because it's a
     // single scheduled call, not a burst source.
-    doc.querySelectorAll('.view-mode-btn, .mobile-view-mode-btn').forEach(function (b) {
+    doc.querySelectorAll(
+      '.view-toggle-btn, .mobile-view-mode-btn'
+    ).forEach(function (b) {
       b.addEventListener('click', function () { setTimeout(realign, 200); });
     });
 
     function openDrawer() {
       drawer.classList.add('open');
       fab.hidden = true;
+      fab.setAttribute('aria-expanded', 'true');
     }
     function closeDrawer() {
       drawer.classList.remove('open');
       fab.hidden = false;
+      fab.setAttribute('aria-expanded', 'false');
     }
 
     // Hover-intent open: 80ms guard avoids opening on pointer passing
@@ -235,6 +247,18 @@
         cancelClose();
         closeDrawer();
       }
+    });
+    // 클릭/터치로 토글-오픈했는데 마우스가 그대로 머물러 있으면
+    // drawer 의 mouseleave 가 발화하지 않아 무한히 떠 있을 수 있다.
+    // capture phase 가 아닌 bubble phase 라 다른 핸들러 우선순위에
+    // 영향을 주지 않는다.
+    doc.addEventListener('click', function (e) {
+      if (!drawer.classList.contains('open')) return;
+      var t = e.target;
+      if (drawer.contains(t) || fab.contains(t)) return;
+      cancelOpen();
+      cancelClose();
+      closeDrawer();
     });
 
     function rebuild() {
