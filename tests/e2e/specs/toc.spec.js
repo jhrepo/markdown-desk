@@ -6,6 +6,11 @@ describe('TOC 플로팅 드로어', () => {
   // tests (most visibly the editor-mode hide test).
   beforeEach(async () => {
     await browser.execute(() => {
+      // Cancel any lingering hover-intent timer from the prior spec — a
+      // late-firing closeTimer would race the next spec's scroll-tracking
+      // assertions, marking the drawer closed mid-test.
+      if (window.__mdDeskTocInternals) window.__mdDeskTocInternals.cancelTimers();
+
       const d = document.getElementById('toc-drawer');
       const f = document.getElementById('toc-fab');
       if (d && d.classList.contains('open')) {
@@ -36,34 +41,31 @@ describe('TOC 플로팅 드로어', () => {
     await browser.pause(400);
   }
 
-  it('FAB 클릭으로 drawer 열리고 X 버튼으로 닫힌다', async function () {
+  it('FAB 클릭으로 drawer 가 열린다 (FAB 은 숨겨진다)', async function () {
     const fab = await $('#toc-fab');
     if (!(await fab.isExisting())) return this.skip();
 
     await fab.click();
     await browser.pause(250);
 
-    const drawerOpen = await browser.execute(() => {
-      const d = document.getElementById('toc-drawer');
-      return d && d.classList.contains('open');
-    });
-    expect(drawerOpen).toBe(true);
-
-    // FAB should be hidden while drawer is open
-    const fabHidden = await browser.execute(() => document.getElementById('toc-fab').hidden);
-    expect(fabHidden).toBe(true);
-
-    const closeBtn = await $('.toc-drawer-close');
-    await closeBtn.click();
-    await browser.pause(250);
-
-    const closedState = await browser.execute(() => {
+    const state = await browser.execute(() => {
       const d = document.getElementById('toc-drawer');
       const f = document.getElementById('toc-fab');
       return { open: d.classList.contains('open'), fabHidden: f.hidden };
     });
-    expect(closedState.open).toBe(false);
-    expect(closedState.fabHidden).toBe(false);
+    expect(state.open).toBe(true);
+    expect(state.fabHidden).toBe(true);
+  });
+
+  it('drawer 헤더에 X 닫기 버튼이 없다 (hover-leave 와 Escape 로 충분)', async function () {
+    // hover-leave 와 Escape 로 닫는 경로가 이미 있으니 X 버튼은 잉여라 제거함.
+    // 이 가드는 추후 누군가 닫기 버튼을 다시 넣어 UI 노이즈를 만들었을 때 알린다.
+    const outers = await browser.execute(() => {
+      return Array.from(document.querySelectorAll('.toc-drawer-close')).map(
+        (n) => n.outerHTML.slice(0, 300)
+      );
+    });
+    expect(outers).toEqual([]);
   });
 
   it('ESC 키로 drawer 가 닫힌다', async function () {
@@ -211,6 +213,63 @@ describe('TOC 플로팅 드로어', () => {
         });
       },
       { timeout: 3000, timeoutMsg: 'Active heading did not update to Charlie' }
+    );
+  });
+
+  it('FAB hover 시 drawer 가 자동으로 펼쳐진다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Dispatch mouseenter directly — WebDriver pointer.move on macOS WKWebView
+    // doesn't reliably trip the synthetic hover bridge. Hover-intent timer
+    // is 80ms; wait long enough to pass it plus a margin.
+    await browser.execute(() => {
+      const f = document.getElementById('toc-fab');
+      f.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    });
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          document.getElementById('toc-drawer').classList.contains('open')
+        ),
+      { timeout: 1500, timeoutMsg: 'drawer did not open on FAB hover' }
+    );
+
+    const fabHidden = await browser.execute(() => document.getElementById('toc-fab').hidden);
+    expect(fabHidden).toBe(true);
+  });
+
+  it('FAB / drawer 영역을 동시에 벗어나면 drawer 가 다시 닫힌다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Open via hover, then leave both. Close grace is 250ms — poll up to
+    // 1.5s so slow CI doesn't race the timer.
+    await browser.execute(() => {
+      const f = document.getElementById('toc-fab');
+      f.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    });
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          document.getElementById('toc-drawer').classList.contains('open')
+        ),
+      { timeout: 1500, timeoutMsg: 'drawer did not open on FAB hover' }
+    );
+
+    await browser.execute(() => {
+      const f = document.getElementById('toc-fab');
+      const d = document.getElementById('toc-drawer');
+      f.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+      d.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+    });
+
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () => !document.getElementById('toc-drawer').classList.contains('open')
+        ),
+      { timeout: 1500, timeoutMsg: 'drawer did not close after leaving both regions' }
     );
   });
 

@@ -30,9 +30,11 @@ sed -i '' "s/%%APP_VERSION%%/$APP_VERSION/g" "$FRONTEND_DIR/bridge.js"
 # Strip dev-only hook blocks from release builds so internal test surfaces
 # aren't exposed to production users. Tauri sets TAURI_ENV_DEBUG=true for
 # `tauri build --debug` / `tauri dev`; any other value (including unset)
-# is treated as release.
+# is treated as release. Applied to every bridge-owned script so new
+# dev-hooks can land in any file without per-file maintenance here.
 if [ "${TAURI_ENV_DEBUG:-false}" != "true" ]; then
   sed -i '' '/@dev-hook-start/,/@dev-hook-end/d' "$FRONTEND_DIR/bridge.js"
+  sed -i '' '/@dev-hook-start/,/@dev-hook-end/d' "$FRONTEND_DIR/toc.js"
 fi
 
 # Inject bridge.js into the copied index.html (in <head>, before other scripts).
