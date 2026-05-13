@@ -17,18 +17,6 @@ describe('TOC 플로팅 드로어', () => {
         d.classList.remove('open');
         if (f) f.hidden = false;
       }
-      // Reset scroll + drop any stale active highlight from prior specs.
-      // Without this, "active heading follows scroll" can race a previous
-      // spec's drawer-click scroll, leaving offsets stale at the new
-      // spec's first scroll event.
-      const pane = document.querySelector('.preview-pane');
-      if (pane) {
-        pane.scrollTop = 0;
-        pane.dispatchEvent(new Event('scroll'));
-      }
-      document.querySelectorAll('.toc-drawer-item.active').forEach(function (el) {
-        el.classList.remove('active');
-      });
     });
     // Also make sure the view isn't stuck in editor-only mode from a
     // prior test — split keeps the preview pane visible.
@@ -53,34 +41,31 @@ describe('TOC 플로팅 드로어', () => {
     await browser.pause(400);
   }
 
-  it('FAB 클릭으로 drawer 열리고 X 버튼으로 닫힌다', async function () {
+  it('FAB 클릭으로 drawer 가 열린다 (FAB 은 숨겨진다)', async function () {
     const fab = await $('#toc-fab');
     if (!(await fab.isExisting())) return this.skip();
 
     await fab.click();
     await browser.pause(250);
 
-    const drawerOpen = await browser.execute(() => {
-      const d = document.getElementById('toc-drawer');
-      return d && d.classList.contains('open');
-    });
-    expect(drawerOpen).toBe(true);
-
-    // FAB should be hidden while drawer is open
-    const fabHidden = await browser.execute(() => document.getElementById('toc-fab').hidden);
-    expect(fabHidden).toBe(true);
-
-    const closeBtn = await $('.toc-drawer-close');
-    await closeBtn.click();
-    await browser.pause(250);
-
-    const closedState = await browser.execute(() => {
+    const state = await browser.execute(() => {
       const d = document.getElementById('toc-drawer');
       const f = document.getElementById('toc-fab');
       return { open: d.classList.contains('open'), fabHidden: f.hidden };
     });
-    expect(closedState.open).toBe(false);
-    expect(closedState.fabHidden).toBe(false);
+    expect(state.open).toBe(true);
+    expect(state.fabHidden).toBe(true);
+  });
+
+  it('drawer 헤더에 X 닫기 버튼이 없다 (hover-leave 와 Escape 로 충분)', async function () {
+    // hover-leave 와 Escape 로 닫는 경로가 이미 있으니 X 버튼은 잉여라 제거함.
+    // 이 가드는 추후 누군가 닫기 버튼을 다시 넣어 UI 노이즈를 만들었을 때 알린다.
+    const outers = await browser.execute(() => {
+      return Array.from(document.querySelectorAll('.toc-drawer-close')).map(
+        (n) => n.outerHTML.slice(0, 300)
+      );
+    });
+    expect(outers).toEqual([]);
   });
 
   it('ESC 키로 drawer 가 닫힌다', async function () {

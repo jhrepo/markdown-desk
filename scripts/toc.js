@@ -69,9 +69,7 @@
       '#toc-drawer{position:fixed;width:240px;display:flex;flex-direction:column;background:var(--bg-secondary,#fff);border:1px solid var(--border-color,#d0d7de);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.15);transition:transform .18s ease,opacity .18s ease;z-index:9998;font-size:13px;transform:translateX(16px);opacity:0;pointer-events:none}',
       '#toc-drawer.open{transform:translateX(0);opacity:1;pointer-events:auto}',
       '#toc-drawer[hidden]{display:none}',
-      '.toc-drawer-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px 8px 12px;font-weight:600;border-bottom:1px solid var(--border-color,#d0d7de)}',
-      '.toc-drawer-close{background:transparent;border:0;padding:4px;margin:0;cursor:pointer;color:var(--text-muted,#6e7781);font-size:14px;line-height:1;border-radius:4px;display:flex;align-items:center;justify-content:center}',
-      '.toc-drawer-close:hover{background:var(--bg-tertiary,#f6f8fa);color:var(--text-primary,#24292f)}',
+      '.toc-drawer-header{padding:8px 12px;font-weight:600;border-bottom:1px solid var(--border-color,#d0d7de)}',
       '.toc-drawer-list{padding:6px 0;overflow:auto;flex:1}',
       '.toc-drawer-empty{padding:14px 12px;color:var(--text-muted,#6e7781);font-size:12px;text-align:center}',
       '.toc-drawer-item{display:block;padding:4px 12px;color:var(--text-primary,#24292f);text-decoration:none;border-left:2px solid transparent;line-height:1.35}',
@@ -81,9 +79,8 @@
       '.toc-drawer-item.toc-level-3{padding-left:28px}',
       '.toc-drawer-item.toc-level-4{padding-left:36px;font-size:12px;opacity:.85}',
       '[data-theme="dark"] #toc-fab,[data-theme="dark"] #toc-drawer{background:#161b22;color:#c9d1d9;border-color:#30363d}',
-      '[data-theme="dark"] #toc-fab:hover,[data-theme="dark"] .toc-drawer-item:hover,[data-theme="dark"] .toc-drawer-item.active,[data-theme="dark"] .toc-drawer-close:hover{background:#21262d}',
+      '[data-theme="dark"] #toc-fab:hover,[data-theme="dark"] .toc-drawer-item:hover,[data-theme="dark"] .toc-drawer-item.active{background:#21262d}',
       '[data-theme="dark"] .toc-drawer-item{color:#c9d1d9}',
-      '[data-theme="dark"] .toc-drawer-close{color:#8b949e}',
     ].join('');
     var style = doc.createElement('style');
     style.id = 'toc-proto-styles';
@@ -119,10 +116,7 @@
     drawer.id = 'toc-drawer';
     drawer.setAttribute('aria-label', 'Table of contents');
     drawer.innerHTML =
-      '<div class="toc-drawer-header">' +
-      '  <span>목차</span>' +
-      '  <button type="button" class="toc-drawer-close" aria-label="Close table of contents" title="Close"><i class="bi bi-x-lg"></i></button>' +
-      '</div>' +
+      '<div class="toc-drawer-header">목차</div>' +
       '<nav class="toc-drawer-list"></nav>';
     doc.body.appendChild(drawer);
 
@@ -234,11 +228,6 @@
       cancelClose();
       if (drawer.classList.contains('open')) closeDrawer();
       else openDrawer();
-    });
-    drawer.querySelector('.toc-drawer-close').addEventListener('click', function () {
-      cancelOpen();
-      cancelClose();
-      closeDrawer();
     });
     doc.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && drawer.classList.contains('open')) {
