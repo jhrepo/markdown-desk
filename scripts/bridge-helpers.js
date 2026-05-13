@@ -42,8 +42,52 @@
     return stripped || 'document';
   }
 
+  // ---- Webview zoom helpers ----
+  // The original Markdown-Viewer relies on the browser's built-in zoom
+  // (Cmd/Ctrl +/-/0 and trackpad pinch). Tauri's WKWebView ships with
+  // those bindings disabled, so bridge.js intercepts the inputs and
+  // routes them through `core:webview:set-webview-zoom`. These helpers
+  // keep that logic DOM-free so it can be unit-tested.
+
+  var ZOOM_MIN = 0.3;
+  var ZOOM_MAX = 3.0;
+  var ZOOM_STEP = 0.1;
+  // Wheel deltas span ~2 orders of magnitude between trackpad pinch
+  // (~1-10) and mouse wheel + Ctrl (~100). 0.01 maps both into smooth
+  // sub-step increments per frame without making pinch feel jumpy.
+  var WHEEL_ZOOM_RATIO = 0.01;
+
+  function round2(value) {
+    return Math.round(value * 100) / 100;
+  }
+
+  function clampZoom(value, min, max) {
+    if (value == null || !isFinite(value)) return 1.0;
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+  }
+
+  function nextZoomStep(current, direction) {
+    if (!direction) return current;
+    var sign = direction > 0 ? 1 : -1;
+    return clampZoom(round2(current + sign * ZOOM_STEP), ZOOM_MIN, ZOOM_MAX);
+  }
+
+  function nextZoomFromWheel(current, deltaY) {
+    if (!deltaY) return current;
+    // Negative deltaY = scroll-up / pinch-out = zoom in.
+    var step = -deltaY * WHEEL_ZOOM_RATIO;
+    return clampZoom(round2(current + step), ZOOM_MIN, ZOOM_MAX);
+  }
+
   return {
     shouldRunBackgroundCheck: shouldRunBackgroundCheck,
     getExportBaseName: getExportBaseName,
+    clampZoom: clampZoom,
+    nextZoomStep: nextZoomStep,
+    nextZoomFromWheel: nextZoomFromWheel,
+    ZOOM_MIN: ZOOM_MIN,
+    ZOOM_MAX: ZOOM_MAX,
   };
 });

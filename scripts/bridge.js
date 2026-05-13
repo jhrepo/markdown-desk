@@ -814,6 +814,127 @@
     }
   }, true);
 
+  // ---- Webview zoom (Cmd/Ctrl +/-/0 and trackpad pinch / Ctrl+wheel) ----
+  // Tauri WKWebView ships with browser-default zoom bindings disabled, so
+  // we intercept the inputs and call core:webview:set-webview-zoom. The
+  // helpers in scripts/bridge-helpers.js keep the math DOM-free; here we
+  // only wire events and persist the level across reloads.
+  (function() {
+    var helpers = (typeof window !== 'undefined' && window.__bridgeHelpers) || null;
+    if (!helpers || !helpers.nextZoomStep) return;
+
+    var STORAGE_KEY = 'markdown-desk-webview-zoom';
+    var currentZoom = 1.0;
+    try {
+      var stored = parseFloat(localStorage.getItem(STORAGE_KEY));
+      currentZoom = helpers.clampZoom(stored, helpers.ZOOM_MIN, helpers.ZOOM_MAX);
+    } catch (e) { /* localStorage may be unavailable in some sandboxes */ }
+
+    function applyZoom(level) {
+      var next = helpers.clampZoom(level, helpers.ZOOM_MIN, helpers.ZOOM_MAX);
+      if (next === currentZoom) return;
+      currentZoom = next;
+      try { localStorage.setItem(STORAGE_KEY, String(next)); } catch (e) {}
+      if (window.__TAURI_INTERNALS__) {
+        window.__TAURI_INTERNALS__.invoke('plugin:webview|set_webview_zoom', { value: next });
+      }
+    }
+
+    // Restore the persisted level once the IPC bridge is available. The
+    // very first invoke after page load can lose if it races with Tauri's
+    // bootstrap, so we defer one tick.
+    setTimeout(function() {
+      if (currentZoom !== 1.0 && window.__TAURI_INTERNALS__) {
+        window.__TAURI_INTERNALS__.invoke('plugin:webview|set_webview_zoom', { value: currentZoom });
+      }
+    }, 0);
+
+    function handleZoomKey(e) {
+      if (!(e.metaKey || e.ctrlKey)) return false;
+      // `e.key` for Cmd+= is '=' on most layouts. Treat '+' the same so
+      // Shift+Cmd+= (numpad +) also zooms in.
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault(); e.stopPropagation();
+        applyZoom(helpers.nextZoomStep(currentZoom, +1));
+        return true;
+      }
+      if (e.key === '-' || e.key === '_') {
+        e.preventDefault(); e.stopPropagation();
+        applyZoom(helpers.nextZoomStep(currentZoom, -1));
+        return true;
+      }
+      if (e.key === '0') {
+        e.preventDefault(); e.stopPropagation();
+        applyZoom(1.0);
+        return true;
+      }
+      return false;
+    }
+
+    // Trackpad pinch arrives as wheel with synthetic ctrlKey on macOS
+    // WebKit. Real Ctrl/Cmd + wheel hits the same branch. Without
+    // preventDefault the page also scrolls, which feels wrong.
+    function handleZoomWheel(e) {
+      if (!(e.ctrlKey || e.metaKey)) return false;
+      e.preventDefault();
+      applyZoom(helpers.nextZoomFromWheel(currentZoom, e.deltaY));
+      return true;
+    }
+
+    document.addEventListener('keydown', handleZoomKey, true);
+    window.addEventListener('wheel', handleZoomWheel, { passive: false, capture: true });
+
+    // Release-included public entry point for the native View → Zoom menu.
+    // Menu accelerators fire NSMenu first (the OS swallows the keydown so the
+    // capture-phase listener above is never invoked from a menu accelerator),
+    // so menu_event handlers in src-tauri/src/menu.rs eval one of these
+    // functions to share the same applyZoom path — clamp + persist + IPC.
+    window.__mdDeskZoomMenu = {
+      in: function() { applyZoom(helpers.nextZoomStep(currentZoom, +1)); },
+      out: function() { applyZoom(helpers.nextZoomStep(currentZoom, -1)); },
+      reset: function() { applyZoom(1.0); },
+    };
+
+    // @dev-hook-start
+    // Exposed in debug builds only (stripped by prepare-frontend.sh in
+    // release). Synthetic KeyboardEvent dispatch does NOT reach this
+    // module's capture-phase keydown listener in Tauri WKWebView — same
+    // limitation noted in keyboard-shortcuts.spec.js — so e2e calls these
+    // entry points directly to exercise the real branch + apply path.
+    window.__mdDeskZoomInternals = {
+      getZoom: function() { return currentZoom; },
+      getStorageKey: function() { return STORAGE_KEY; },
+      reset: function() {
+        currentZoom = 1.0;
+        try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
+      },
+      pressKey: function(key, modifier) {
+        // modifier ∈ 'meta' | 'ctrl' | 'none' — explicit so 'none' can
+        // exercise the "no modifier → don't intercept" branch.
+        var ev = {
+          metaKey: modifier === 'meta',
+          ctrlKey: modifier === 'ctrl',
+          key: key,
+          preventDefault: function() {},
+          stopPropagation: function() {},
+        };
+        return handleZoomKey(ev);
+      },
+      scrollWheel: function(deltaY, modifier) {
+        // modifier ∈ 'ctrl' (covers trackpad pinch on macOS WebKit, which
+        // synthesizes ctrlKey) | 'meta' | 'none'.
+        var ev = {
+          ctrlKey: modifier === 'ctrl',
+          metaKey: modifier === 'meta',
+          deltaY: deltaY,
+          preventDefault: function() {},
+        };
+        return handleZoomWheel(ev);
+      },
+    };
+    // @dev-hook-end
+  })();
+
   // --- Tab context menu (right-click) ---
   // Close Tab / Close Other Tabs / Close Tabs to the Right / Close Tabs to the Left
   // Reuses the existing per-tab 3-dot Delete action instead of manipulating the
