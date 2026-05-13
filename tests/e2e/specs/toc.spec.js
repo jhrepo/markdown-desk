@@ -6,12 +6,29 @@ describe('TOC 플로팅 드로어', () => {
   // tests (most visibly the editor-mode hide test).
   beforeEach(async () => {
     await browser.execute(() => {
+      // Cancel any lingering hover-intent timer from the prior spec — a
+      // late-firing closeTimer would race the next spec's scroll-tracking
+      // assertions, marking the drawer closed mid-test.
+      if (window.__mdDeskTocInternals) window.__mdDeskTocInternals.cancelTimers();
+
       const d = document.getElementById('toc-drawer');
       const f = document.getElementById('toc-fab');
       if (d && d.classList.contains('open')) {
         d.classList.remove('open');
         if (f) f.hidden = false;
       }
+      // Reset scroll + drop any stale active highlight from prior specs.
+      // Without this, "active heading follows scroll" can race a previous
+      // spec's drawer-click scroll, leaving offsets stale at the new
+      // spec's first scroll event.
+      const pane = document.querySelector('.preview-pane');
+      if (pane) {
+        pane.scrollTop = 0;
+        pane.dispatchEvent(new Event('scroll'));
+      }
+      document.querySelectorAll('.toc-drawer-item.active').forEach(function (el) {
+        el.classList.remove('active');
+      });
     });
     // Also make sure the view isn't stuck in editor-only mode from a
     // prior test — split keeps the preview pane visible.
@@ -211,6 +228,63 @@ describe('TOC 플로팅 드로어', () => {
         });
       },
       { timeout: 3000, timeoutMsg: 'Active heading did not update to Charlie' }
+    );
+  });
+
+  it('FAB hover 시 drawer 가 자동으로 펼쳐진다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Dispatch mouseenter directly — WebDriver pointer.move on macOS WKWebView
+    // doesn't reliably trip the synthetic hover bridge. Hover-intent timer
+    // is 80ms; wait long enough to pass it plus a margin.
+    await browser.execute(() => {
+      const f = document.getElementById('toc-fab');
+      f.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    });
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          document.getElementById('toc-drawer').classList.contains('open')
+        ),
+      { timeout: 1500, timeoutMsg: 'drawer did not open on FAB hover' }
+    );
+
+    const fabHidden = await browser.execute(() => document.getElementById('toc-fab').hidden);
+    expect(fabHidden).toBe(true);
+  });
+
+  it('FAB / drawer 영역을 동시에 벗어나면 drawer 가 다시 닫힌다', async function () {
+    const fab = await $('#toc-fab');
+    if (!(await fab.isExisting())) return this.skip();
+
+    // Open via hover, then leave both. Close grace is 250ms — poll up to
+    // 1.5s so slow CI doesn't race the timer.
+    await browser.execute(() => {
+      const f = document.getElementById('toc-fab');
+      f.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    });
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          document.getElementById('toc-drawer').classList.contains('open')
+        ),
+      { timeout: 1500, timeoutMsg: 'drawer did not open on FAB hover' }
+    );
+
+    await browser.execute(() => {
+      const f = document.getElementById('toc-fab');
+      const d = document.getElementById('toc-drawer');
+      f.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+      d.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+    });
+
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () => !document.getElementById('toc-drawer').classList.contains('open')
+        ),
+      { timeout: 1500, timeoutMsg: 'drawer did not close after leaving both regions' }
     );
   });
 

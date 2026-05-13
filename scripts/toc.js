@@ -180,10 +180,72 @@
       drawer.classList.remove('open');
       fab.hidden = false;
     }
-    fab.addEventListener('click', openDrawer);
-    drawer.querySelector('.toc-drawer-close').addEventListener('click', closeDrawer);
+
+    // Hover-intent open: 80ms guard avoids opening on pointer passing
+    // through the FAB en route to elsewhere. Close grace: 250ms after
+    // leaving FAB *or* drawer lets the user travel the gap between them
+    // without the panel collapsing under them. Both timers are mutually
+    // canceling so click/Escape still take effect immediately.
+    var openTimer = 0;
+    var closeTimer = 0;
+    function cancelOpen() {
+      if (openTimer) { clearTimeout(openTimer); openTimer = 0; }
+    }
+    function cancelClose() {
+      if (closeTimer) { clearTimeout(closeTimer); closeTimer = 0; }
+    }
+    function scheduleOpen() {
+      cancelClose();
+      if (drawer.classList.contains('open') || openTimer) return;
+      openTimer = setTimeout(function () {
+        openTimer = 0;
+        openDrawer();
+      }, 80);
+    }
+    function scheduleClose() {
+      cancelOpen();
+      if (!drawer.classList.contains('open') || closeTimer) return;
+      closeTimer = setTimeout(function () {
+        closeTimer = 0;
+        closeDrawer();
+      }, 250);
+    }
+
+    fab.addEventListener('mouseenter', scheduleOpen);
+    fab.addEventListener('mouseleave', scheduleClose);
+    drawer.addEventListener('mouseenter', cancelClose);
+    drawer.addEventListener('mouseleave', scheduleClose);
+
+    // @dev-hook-start
+    // Cancel any in-flight hover-intent / hover-leave timers so e2e specs
+    // can isolate themselves from a prior spec's lingering hover state.
+    // Stripped from release by prepare-frontend.sh.
+    if (doc.defaultView) {
+      doc.defaultView.__mdDeskTocInternals = {
+        cancelTimers: function () { cancelOpen(); cancelClose(); },
+      };
+    }
+    // @dev-hook-end
+
+    // Click stays as an explicit toggle so touch / keyboard users (and the
+    // existing e2e click flow) continue to work without depending on hover.
+    fab.addEventListener('click', function () {
+      cancelOpen();
+      cancelClose();
+      if (drawer.classList.contains('open')) closeDrawer();
+      else openDrawer();
+    });
+    drawer.querySelector('.toc-drawer-close').addEventListener('click', function () {
+      cancelOpen();
+      cancelClose();
+      closeDrawer();
+    });
     doc.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && drawer.classList.contains('open')) closeDrawer();
+      if (e.key === 'Escape' && drawer.classList.contains('open')) {
+        cancelOpen();
+        cancelClose();
+        closeDrawer();
+      }
     });
 
     function rebuild() {
