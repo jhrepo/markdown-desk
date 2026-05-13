@@ -269,16 +269,15 @@
       try { localStorage.setItem(UPDATE_LAST_CHECK_KEY, String(Date.now())); } catch (e) {}
       if (update) {
         _pendingUpdate = update;
-        if (mode === MODE_MANUAL) {
-          await runUpdateInstall(update, { skipConfirm: false });
-        } else {
-          var snoozed = localStorage.getItem(UPDATE_SNOOZED_KEY);
-          if (snoozed !== update.version) {
-            // showUpdateBanner owns the full teardown→set sequence for the
-            // title suffix so the set invoke always wins over any nested
-            // hide from "replace prior banner" logic.
-            showUpdateBanner(update.version);
-          }
+        // Unified alert path: both manual and background land on the status
+        // bar. Background respects the snooze (so we don't repeatedly nag),
+        // but a manual menu click bypasses snooze — the user explicitly
+        // asked, and silently doing nothing would look like the check broke.
+        // showUpdateBanner owns the full teardown→set sequence for the title
+        // suffix so the set invoke always wins over any nested hide.
+        var snoozed = localStorage.getItem(UPDATE_SNOOZED_KEY);
+        if (mode === MODE_MANUAL || snoozed !== update.version) {
+          showUpdateBanner(update.version);
         }
       } else if (mode === MODE_MANUAL) {
         if (window.__TAURI__.dialog) {
@@ -344,15 +343,21 @@
       .catch(function(e) { console.warn('[updater] set_update_title_suffix failed:', e); });
   }
 
-  // Banner styles — injected once, theme-adaptive via existing CSS vars.
+  // Slim bottom status-bar styles. Full accent fill keeps the cue clearly
+  // visible (the prior top-fixed bar was too invasive vertically; a muted
+  // bg would have been too easy to miss). Height target ~26-30px; the
+  // e2e height guard pins ≤40 to block regressions to the old thick bar.
   var updateBannerStyle = document.createElement('style');
   updateBannerStyle.textContent =
-    '.' + UPDATE_BANNER_CLASS + '{position:fixed;top:0;left:0;right:0;z-index:9998;display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--accent-color,#0969da);color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.15);}' +
+    '.' + UPDATE_BANNER_CLASS + '{position:fixed;bottom:0;left:0;right:0;z-index:9998;display:flex;align-items:center;gap:10px;padding:4px 12px;background:var(--accent-color,#0969da);color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:12px;line-height:1.4;box-shadow:0 -2px 6px rgba(0,0,0,.15);}' +
     '.' + UPDATE_BANNER_CLASS + '-msg{flex:1;}' +
-    '.' + UPDATE_BANNER_CLASS + ' button{padding:4px 12px;border:1px solid rgba(255,255,255,.55);border-radius:4px;background:transparent;color:#fff;font:inherit;cursor:pointer;}' +
+    '.' + UPDATE_BANNER_CLASS + '-release-link{color:#fff;text-decoration:underline;cursor:pointer;}' +
+    '.' + UPDATE_BANNER_CLASS + '-release-link:hover{opacity:.85;}' +
+    '.' + UPDATE_BANNER_CLASS + ' button{padding:2px 10px;border:1px solid rgba(255,255,255,.55);border-radius:3px;background:transparent;color:#fff;font:inherit;cursor:pointer;}' +
     '.' + UPDATE_BANNER_CLASS + ' button:hover{background:rgba(255,255,255,.18);}' +
     '.' + UPDATE_BANNER_CLASS + '-update{background:#fff;color:var(--accent-color,#0969da);border-color:#fff;font-weight:600;}' +
-    '.' + UPDATE_BANNER_CLASS + '-update:hover{background:rgba(255,255,255,.88);}';
+    '.' + UPDATE_BANNER_CLASS + '-update:hover{background:rgba(255,255,255,.88);}' +
+    '.' + UPDATE_BANNER_CLASS + '-close{padding:0 6px;font-size:16px;line-height:1;border:none;}';
   document.head.appendChild(updateBannerStyle);
 
   function showUpdateBanner(version) {
@@ -370,6 +375,25 @@
     msg.className = UPDATE_BANNER_CLASS + '-msg';
     msg.textContent = '⬆ New version ' + version + ' is available';
 
+    // "What's new" link → GitHub release tag page. The href stays a real
+    // URL (e2e asserts on it) but clicks are intercepted to route through
+    // a Tauri command that opens the user's default browser and falls
+    // back to /releases/latest if the tagged page hasn't been published yet.
+    var releaseLink = document.createElement('a');
+    releaseLink.className = UPDATE_BANNER_CLASS + '-release-link';
+    releaseLink.href =
+      'https://github.com/jhrepo/markdown-desk/releases/tag/v' + version;
+    releaseLink.target = '_blank';
+    releaseLink.rel = 'noopener noreferrer';
+    releaseLink.textContent = "What's new";
+    releaseLink.addEventListener('click', function(e) {
+      if (window.__TAURI_INTERNALS__) {
+        e.preventDefault();
+        window.__TAURI_INTERNALS__.invoke('open_release_page', { version: version })
+          .catch(function(err) { console.warn('[updater] open_release_page failed:', err); });
+      }
+    });
+
     var updateBtn = document.createElement('button');
     updateBtn.type = 'button';
     updateBtn.className = UPDATE_BANNER_CLASS + '-update';
@@ -381,20 +405,22 @@
       }
     });
 
-    var laterBtn = document.createElement('button');
-    laterBtn.type = 'button';
-    laterBtn.className = UPDATE_BANNER_CLASS + '-later';
-    laterBtn.textContent = 'Later';
-    laterBtn.addEventListener('click', function() {
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = UPDATE_BANNER_CLASS + '-close';
+    closeBtn.setAttribute('aria-label', 'Close update notice');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', function() {
       try { localStorage.setItem(UPDATE_SNOOZED_KEY, version); } catch (e) {}
       _pendingUpdate = null;
       hideUpdateBanner();
     });
 
     banner.appendChild(msg);
+    banner.appendChild(releaseLink);
     banner.appendChild(updateBtn);
-    banner.appendChild(laterBtn);
-    document.body.insertBefore(banner, document.body.firstChild);
+    banner.appendChild(closeBtn);
+    document.body.appendChild(banner);
   }
 
   // DOM-only teardown. Call this when you intend to follow it with another

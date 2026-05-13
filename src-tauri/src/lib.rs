@@ -61,6 +61,7 @@ pub fn run() {
                 commands::is_default_md_app,
                 commands::set_default_md_app,
                 commands::set_update_title_suffix,
+                commands::open_release_page,
             ])
         .setup(|app| {
             dbg_log!("Setup: building menu");
@@ -587,10 +588,33 @@ mod bridge_update_check_tests {
     }
 
     #[test]
-    fn banner_has_update_and_later_buttons() {
+    fn banner_has_update_and_close_controls() {
         let s = bridge_js();
         assert!(s.contains("'Update'"), "Update button label missing");
-        assert!(s.contains("'Later'"), "Later button label missing");
+        // Status-bar variant replaced the "Later" button with a single ×
+        // close button identified by aria-label "Close update notice".
+        assert!(
+            s.contains("'Close update notice'"),
+            "close button aria-label missing — \
+             snooze dismiss path may have regressed"
+        );
+    }
+
+    #[test]
+    fn banner_has_release_notes_link() {
+        let s = bridge_js();
+        // The What's new link routes through a Tauri command to the
+        // GitHub release page. e2e asserts on the href value too, but
+        // we pin the invoke name here so a bridge.js rename without a
+        // matching command rename is caught by Rust tests.
+        assert!(
+            s.contains("\"What's new\""),
+            "What's new link label missing from banner"
+        );
+        assert!(
+            s.contains("'open_release_page'"),
+            "open_release_page invoke missing — link will silently no-op"
+        );
     }
 
     #[test]
@@ -748,6 +772,59 @@ mod bridge_update_check_tests {
             "snooze clear must happen inside the success path, before the catch block"
         );
     }
+
+    #[test]
+    fn manual_check_routes_updates_to_status_bar_not_dialog() {
+        let s = bridge_js();
+        // Pre-unification, the MODE_MANUAL branch called
+        // `runUpdateInstall(update, { skipConfirm: false })`, which popped a
+        // synchronous "New version X is available. Update now?" confirm
+        // dialog — a second alert path competing with the status bar.
+        // After unification, both modes route to showUpdateBanner; the banner's
+        // Update button is the *only* caller of runUpdateInstall and it always
+        // passes skipConfirm: true. The literal "skipConfirm: false" returning
+        // means the legacy dialog path has regressed.
+        assert!(
+            !s.contains("skipConfirm: false"),
+            "Manual update check must not invoke runUpdateInstall with \
+             skipConfirm: false — that reintroduces the dialog we unified \
+             into the status bar"
+        );
+    }
+
+    #[test]
+    fn manual_check_keeps_no_update_and_failure_dialogs() {
+        let s = bridge_js();
+        // Manual check is an explicit user action: the menu click expects
+        // feedback. The status bar only renders when *there is* an update,
+        // so the no-update and check-failed paths must still surface as
+        // dialogs — otherwise pressing the menu yields nothing.
+        assert!(
+            s.contains("'You are using the latest version.'"),
+            "Manual no-update feedback dialog missing"
+        );
+        assert!(
+            s.contains("'Failed to check for updates.'"),
+            "Manual check-failed dialog missing"
+        );
+    }
+
+    #[test]
+    fn manual_check_bypasses_snooze() {
+        let s = bridge_js();
+        // After unification, the snooze key still gates background checks
+        // (so we don't repeatedly nag), but a manual menu click bypasses it.
+        // Without this, dismissing once and then trying "Check for Updates…"
+        // produces no feedback — equivalent to a silent failure.
+        // The bridge implements this as `mode === MODE_MANUAL || snoozed !==
+        // update.version`. Both halves must remain present.
+        assert!(
+            s.contains("mode === MODE_MANUAL || snoozed !== update.version"),
+            "Manual check must bypass snooze when an update is present \
+             (expected `mode === MODE_MANUAL || snoozed !== update.version` \
+             guard in doCheckForUpdates)"
+        );
+    }
 }
 
 /// Structural invariants for `scripts/prepare-frontend.sh`.
@@ -827,23 +904,36 @@ mod rust_invoke_handler_tests {
         }
     }
 
-    #[test]
-    fn set_update_title_suffix_is_registered_in_invoke_handler() {
+    fn handler_block() -> &'static str {
         let src = production_src();
-        // Locate the generate_handler! block and assert the command is in it.
-        let handler_start = src
+        let start = src
             .find("tauri::generate_handler![")
             .expect("invoke_handler registration block missing");
-        let handler_end = src[handler_start..]
+        let end = src[start..]
             .find(']')
-            .map(|e| handler_start + e)
+            .map(|e| start + e)
             .expect("invoke_handler block is not closed");
-        let block = &src[handler_start..=handler_end];
+        // Box::leak to satisfy the &'static str return — fine in tests.
+        Box::leak(src[start..=end].to_string().into_boxed_str())
+    }
+
+    #[test]
+    fn set_update_title_suffix_is_registered_in_invoke_handler() {
         assert!(
-            block.contains("set_update_title_suffix"),
+            handler_block().contains("set_update_title_suffix"),
             "set_update_title_suffix must be listed in generate_handler![] \
              (bridge.js invokes this command; without registration every \
              call silently fails)"
+        );
+    }
+
+    #[test]
+    fn open_release_page_is_registered_in_invoke_handler() {
+        assert!(
+            handler_block().contains("open_release_page"),
+            "open_release_page must be listed in generate_handler![] \
+             (the update status bar's What's new link invokes this; \
+             without registration the link silently no-ops)"
         );
     }
 }

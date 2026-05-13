@@ -444,6 +444,69 @@ pub fn set_update_title_suffix(app: tauri::AppHandle, suffix: String) -> Result<
     }
 }
 
+/// Accept only CalVer-shaped tokens (digits and dots). Markdown Desk ships
+/// pure numeric `YY.M.MICRO` versions (no prerelease suffix), so anything
+/// non-digit is rejected — this keeps the value safe to splice into the URL
+/// we hand to /usr/bin/open.
+pub(crate) fn is_safe_version_token(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 32
+        && version
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.')
+}
+
+pub(crate) const RELEASE_TAG_URL_PREFIX: &str =
+    "https://github.com/jhrepo/markdown-desk/releases/tag/v";
+pub(crate) const RELEASE_LATEST_URL: &str =
+    "https://github.com/jhrepo/markdown-desk/releases/latest";
+
+/// HEAD-check the tag URL and return it if reachable (HTTP 200); otherwise
+/// fall back to /releases/latest. Uses /usr/bin/curl to avoid pulling a
+/// new Rust HTTP dependency just for one probe.
+fn resolve_release_url(version: &str) -> String {
+    let tag_url = format!("{}{}", RELEASE_TAG_URL_PREFIX, version);
+    let probe = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "-sIL",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            &tag_url,
+        ])
+        .output();
+    match probe {
+        Ok(out) => {
+            let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if code == "200" {
+                tag_url
+            } else {
+                RELEASE_LATEST_URL.to_string()
+            }
+        }
+        Err(_) => RELEASE_LATEST_URL.to_string(),
+    }
+}
+
+/// Open the GitHub release page for the given version in the user's default
+/// browser. Falls back to /releases/latest if the tagged page isn't yet
+/// reachable (e.g. transient CDN gap right after a release).
+#[tauri::command]
+pub fn open_release_page(version: String) -> Result<(), String> {
+    if !is_safe_version_token(&version) {
+        return Err("invalid version format".to_string());
+    }
+    let url = resolve_release_url(&version);
+    std::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")
@@ -1394,5 +1457,76 @@ mod tests {
         // Caller owns spacing; we must not silently strip it.
         assert_eq!(build_update_title(" extra"), "Markdown Desk extra");
         assert_eq!(build_update_title("extra"), "Markdown Deskextra");
+    }
+
+    // --- is_safe_version_token tests ---
+    // The version token is interpolated into a URL we hand to /usr/bin/open.
+    // Anything we accept here must be safe as a URL path segment AND as a
+    // single argv slot — no spaces, quotes, slashes, or shell metacharacters.
+
+    #[test]
+    fn is_safe_version_token_accepts_calver() {
+        assert!(is_safe_version_token("26.5.1"));
+        assert!(is_safe_version_token("26.5.10"));
+        assert!(is_safe_version_token("1.0.0"));
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_empty() {
+        assert!(!is_safe_version_token(""));
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_hyphen() {
+        // Markdown Desk has no prerelease scheme; rejecting hyphen keeps the
+        // accept set as tight as possible. If we add prerelease versions
+        // later, update both this rule and bridge.js's URL builder.
+        assert!(!is_safe_version_token("26.5.1-rc1"));
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_path_traversal() {
+        assert!(!is_safe_version_token("../etc/passwd"));
+        assert!(!is_safe_version_token("26.5.1/extra"));
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_shell_metacharacters() {
+        assert!(!is_safe_version_token("26.5.1;ls"));
+        assert!(!is_safe_version_token("26.5.1 && rm -rf"));
+        assert!(!is_safe_version_token("26.5.1`whoami`"));
+        assert!(!is_safe_version_token("26.5.1$(id)"));
+        assert!(!is_safe_version_token("26.5.1|cat"));
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_letters() {
+        // Versions are CalVer numerics. Letters would also imply uppercase
+        // schemes (URLs with letters) that we don't intend to support.
+        assert!(!is_safe_version_token("v26.5.1"));
+        assert!(!is_safe_version_token("26.5.1a"));
+    }
+
+    #[test]
+    fn is_safe_version_token_rejects_overlong_input() {
+        let long = "1.".repeat(20); // 40 chars
+        assert!(!is_safe_version_token(&long));
+    }
+
+    // --- release URL constants ---
+
+    #[test]
+    fn release_url_constants_point_at_correct_repo() {
+        // bridge.js builds the same tag URL client-side and the e2e spec
+        // asserts on it. If the repo path drifts here without a matching
+        // bridge.js update, the link in the banner stops matching reality.
+        assert_eq!(
+            RELEASE_TAG_URL_PREFIX,
+            "https://github.com/jhrepo/markdown-desk/releases/tag/v"
+        );
+        assert_eq!(
+            RELEASE_LATEST_URL,
+            "https://github.com/jhrepo/markdown-desk/releases/latest"
+        );
     }
 }
