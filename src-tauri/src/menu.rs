@@ -23,8 +23,32 @@ pub(crate) const JS_ZOOM_OUT: &str =
 pub(crate) const JS_ZOOM_RESET: &str =
     "if(typeof window.__mdDeskZoomMenu==='object')window.__mdDeskZoomMenu.reset();";
 
+// Menu item ids — shared by build_menu (which stamps them on the MenuItems) and
+// resolve_menu_action (which maps a clicked id back to an action). Defining them
+// once means a rename can't desync the two: build_menu would no longer compile
+// against a stale literal, and the round-trip tests pin the mapping. A drift
+// here is the classic "menu item does nothing when clicked" bug.
+pub(crate) const MENU_ID_OPEN: &str = "open";
+pub(crate) const MENU_ID_SAVE: &str = "save";
+pub(crate) const MENU_ID_CHECK_UPDATE: &str = "check_update";
+pub(crate) const MENU_ID_ZOOM_IN: &str = "zoom_in";
+pub(crate) const MENU_ID_ZOOM_OUT: &str = "zoom_out";
+pub(crate) const MENU_ID_ZOOM_RESET: &str = "zoom_reset";
+
+/// Every custom (id-bearing) menu item build_menu adds. Predefined items
+/// (undo/redo/cut/…, about, quit, fullscreen) are handled by the OS and carry
+/// no custom id, so they're intentionally excluded.
+pub(crate) const MENU_ITEM_IDS: &[&str] = &[
+    MENU_ID_OPEN,
+    MENU_ID_SAVE,
+    MENU_ID_CHECK_UPDATE,
+    MENU_ID_ZOOM_IN,
+    MENU_ID_ZOOM_OUT,
+    MENU_ID_ZOOM_RESET,
+];
+
 pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    let check_update_item = MenuItemBuilder::with_id("check_update", "Check for Updates...")
+    let check_update_item = MenuItemBuilder::with_id(MENU_ID_CHECK_UPDATE, "Check for Updates...")
         .build(app)?;
 
     let app_menu = SubmenuBuilder::new(app, "Markdown Desk")
@@ -35,11 +59,11 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
         .quit()
         .build()?;
 
-    let open_item = MenuItemBuilder::with_id("open", "Open File...")
+    let open_item = MenuItemBuilder::with_id(MENU_ID_OPEN, "Open File...")
         .accelerator("CmdOrCtrl+O")
         .build(app)?;
 
-    let save_item = MenuItemBuilder::with_id("save", "Save")
+    let save_item = MenuItemBuilder::with_id(MENU_ID_SAVE, "Save")
         .accelerator("CmdOrCtrl+S")
         .build(app)?;
 
@@ -65,13 +89,13 @@ pub fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
     // action. bridge.js's handleZoomKey already accepts both `=` and
     // `+`, so a user reaching for Cmd+Shift+= (the keycap path) still
     // zooms in — the change is purely the menu glyph.
-    let zoom_in_item = MenuItemBuilder::with_id("zoom_in", "Zoom In")
+    let zoom_in_item = MenuItemBuilder::with_id(MENU_ID_ZOOM_IN, "Zoom In")
         .accelerator("CmdOrCtrl+=")
         .build(app)?;
-    let zoom_out_item = MenuItemBuilder::with_id("zoom_out", "Zoom Out")
+    let zoom_out_item = MenuItemBuilder::with_id(MENU_ID_ZOOM_OUT, "Zoom Out")
         .accelerator("CmdOrCtrl+-")
         .build(app)?;
-    let zoom_reset_item = MenuItemBuilder::with_id("zoom_reset", "Actual Size")
+    let zoom_reset_item = MenuItemBuilder::with_id(MENU_ID_ZOOM_RESET, "Actual Size")
         .accelerator("CmdOrCtrl+0")
         .build(app)?;
 
@@ -105,55 +129,49 @@ pub(crate) enum MenuAction {
 /// Map a menu event ID string to a MenuAction.
 pub(crate) fn resolve_menu_action(id: &str) -> MenuAction {
     match id {
-        "open" => MenuAction::Open,
-        "save" => MenuAction::Save,
-        "check_update" => MenuAction::CheckUpdate,
-        "zoom_in" => MenuAction::ZoomIn,
-        "zoom_out" => MenuAction::ZoomOut,
-        "zoom_reset" => MenuAction::ZoomReset,
+        MENU_ID_OPEN => MenuAction::Open,
+        MENU_ID_SAVE => MenuAction::Save,
+        MENU_ID_CHECK_UPDATE => MenuAction::CheckUpdate,
+        MENU_ID_ZOOM_IN => MenuAction::ZoomIn,
+        MENU_ID_ZOOM_OUT => MenuAction::ZoomOut,
+        MENU_ID_ZOOM_RESET => MenuAction::ZoomReset,
         _ => MenuAction::Unknown,
+    }
+}
+
+/// JS snippet a menu action evals into the webview, or None for actions that
+/// don't go through eval. Open opens the native file dialog (Rust side, no
+/// eval); Unknown is inert. Extracted from setup_menu_events so the
+/// action→snippet routing is unit-testable without a running app — guards
+/// against a copy-paste swap (e.g. ZoomIn wired to the zoom-out snippet).
+pub(crate) fn menu_action_eval_js(action: &MenuAction) -> Option<&'static str> {
+    match action {
+        MenuAction::Save => Some(JS_SAVE_FILE),
+        MenuAction::CheckUpdate => Some(JS_CHECK_UPDATE),
+        MenuAction::ZoomIn => Some(JS_ZOOM_IN),
+        MenuAction::ZoomOut => Some(JS_ZOOM_OUT),
+        MenuAction::ZoomReset => Some(JS_ZOOM_RESET),
+        MenuAction::Open | MenuAction::Unknown => None,
     }
 }
 
 pub fn setup_menu_events(app: &tauri::AppHandle) {
     let app_handle = app.clone();
     app.on_menu_event(move |_app, event| {
-        match resolve_menu_action(event.id().as_ref()) {
-            MenuAction::Open => {
-                dbg_log!("[menu] Open clicked");
-                crate::commands::open_file_and_watch(&app_handle);
+        let id = event.id().as_ref().to_string();
+        let action = resolve_menu_action(&id);
+        // Open is the one action that runs Rust-side (native dialog), not eval.
+        if matches!(action, MenuAction::Open) {
+            dbg_log!("[menu] Open clicked");
+            crate::commands::open_file_and_watch(&app_handle);
+            return;
+        }
+        // Everything else routes through a tested action→JS map.
+        if let Some(js) = menu_action_eval_js(&action) {
+            dbg_log!("[menu] eval action for id: {}", id);
+            if let Some(ww) = app_handle.get_webview_window("main") {
+                let _ = ww.eval(js);
             }
-            MenuAction::Save => {
-                dbg_log!("[menu] Save clicked");
-                if let Some(ww) = app_handle.get_webview_window("main") {
-                    let _ = ww.eval(JS_SAVE_FILE);
-                }
-            }
-            MenuAction::CheckUpdate => {
-                dbg_log!("[menu] Check for Updates clicked");
-                if let Some(ww) = app_handle.get_webview_window("main") {
-                    let _ = ww.eval(JS_CHECK_UPDATE);
-                }
-            }
-            MenuAction::ZoomIn => {
-                dbg_log!("[menu] Zoom In clicked");
-                if let Some(ww) = app_handle.get_webview_window("main") {
-                    let _ = ww.eval(JS_ZOOM_IN);
-                }
-            }
-            MenuAction::ZoomOut => {
-                dbg_log!("[menu] Zoom Out clicked");
-                if let Some(ww) = app_handle.get_webview_window("main") {
-                    let _ = ww.eval(JS_ZOOM_OUT);
-                }
-            }
-            MenuAction::ZoomReset => {
-                dbg_log!("[menu] Actual Size clicked");
-                if let Some(ww) = app_handle.get_webview_window("main") {
-                    let _ = ww.eval(JS_ZOOM_RESET);
-                }
-            }
-            MenuAction::Unknown => {}
         }
     });
 }
@@ -304,5 +322,85 @@ mod tests {
     #[test]
     fn resolve_menu_action_zoom_reset() {
         assert!(matches!(resolve_menu_action("zoom_reset"), MenuAction::ZoomReset));
+    }
+
+    // --- menu id ↔ action contract ---
+    // build_menu() stamps MENU_ID_* on its items; resolve_menu_action() maps
+    // them back. They share the constants now, but these tests pin the mapping
+    // so a future edit to either side (or a new menu item without a resolve
+    // arm) is caught as "clicking this menu item does nothing".
+
+    #[test]
+    fn menu_ids_round_trip_to_their_actions() {
+        assert!(matches!(resolve_menu_action(MENU_ID_OPEN), MenuAction::Open));
+        assert!(matches!(resolve_menu_action(MENU_ID_SAVE), MenuAction::Save));
+        assert!(matches!(resolve_menu_action(MENU_ID_CHECK_UPDATE), MenuAction::CheckUpdate));
+        assert!(matches!(resolve_menu_action(MENU_ID_ZOOM_IN), MenuAction::ZoomIn));
+        assert!(matches!(resolve_menu_action(MENU_ID_ZOOM_OUT), MenuAction::ZoomOut));
+        assert!(matches!(resolve_menu_action(MENU_ID_ZOOM_RESET), MenuAction::ZoomReset));
+    }
+
+    #[test]
+    fn every_custom_menu_id_resolves_to_a_known_action() {
+        for id in MENU_ITEM_IDS {
+            assert!(
+                !matches!(resolve_menu_action(id), MenuAction::Unknown),
+                "menu id {id:?} is built but has no resolve_menu_action arm — clicking it would do nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_item_ids_are_unique() {
+        // A duplicate id would make two menu items dispatch the same action.
+        let mut seen = std::collections::HashSet::new();
+        for id in MENU_ITEM_IDS {
+            assert!(seen.insert(*id), "duplicate menu id: {id:?}");
+        }
+    }
+
+    // --- menu_action_eval_js (action → JS routing) ---
+
+    #[test]
+    fn menu_action_eval_js_routes_each_action_to_its_snippet() {
+        assert_eq!(menu_action_eval_js(&MenuAction::Save), Some(JS_SAVE_FILE));
+        assert_eq!(menu_action_eval_js(&MenuAction::CheckUpdate), Some(JS_CHECK_UPDATE));
+        assert_eq!(menu_action_eval_js(&MenuAction::ZoomIn), Some(JS_ZOOM_IN));
+        assert_eq!(menu_action_eval_js(&MenuAction::ZoomOut), Some(JS_ZOOM_OUT));
+        assert_eq!(menu_action_eval_js(&MenuAction::ZoomReset), Some(JS_ZOOM_RESET));
+    }
+
+    #[test]
+    fn menu_action_eval_js_open_and_unknown_have_no_snippet() {
+        // Open runs the native dialog (Rust side); Unknown is inert.
+        assert_eq!(menu_action_eval_js(&MenuAction::Open), None);
+        assert_eq!(menu_action_eval_js(&MenuAction::Unknown), None);
+    }
+
+    #[test]
+    fn menu_action_eval_js_does_not_swap_zoom_directions() {
+        // Guards the copy-paste class: ZoomIn must not eval the zoom-out snippet.
+        let zin = menu_action_eval_js(&MenuAction::ZoomIn).unwrap();
+        let zout = menu_action_eval_js(&MenuAction::ZoomOut).unwrap();
+        assert_ne!(zin, zout);
+        assert!(zin.contains(".in()"), "ZoomIn must route to the .in() snippet");
+        assert!(zout.contains(".out()"), "ZoomOut must route to the .out() snippet");
+    }
+
+    #[test]
+    fn every_eval_action_has_a_resolvable_menu_id() {
+        // Full loop: each built menu id → action → (for eval actions) a snippet.
+        // Open is the documented exception (native dialog, no eval).
+        for id in MENU_ITEM_IDS {
+            let action = resolve_menu_action(id);
+            if matches!(action, MenuAction::Open) {
+                assert_eq!(menu_action_eval_js(&action), None);
+            } else {
+                assert!(
+                    menu_action_eval_js(&action).is_some(),
+                    "menu id {id:?} resolves to an action with no eval snippet"
+                );
+            }
+        }
     }
 }

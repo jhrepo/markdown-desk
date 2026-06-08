@@ -1,0 +1,64 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The weekly "Check Submodule Update" workflow opens a PR (branch
+# auto/submodule-update) whenever Markdown-Viewer ships a new Production
+# deployment. `pull_request` makes this suite run on that PR automatically, so a
+# submodule bump that breaks our DOM/contract coupling is caught here — by the
+# static + behavioral contract tests — instead of slipping through the PR's
+# manual checklist.
+
+# macOS runner (matches release.yml): scripts/prepare-frontend.sh uses BSD
+# `sed -i ''` and default_app.rs links macOS Launch Services, so the unit suite
+# is exercised on the same platform we ship.
+
+jobs:
+  unit:
+    name: Unit tests + coverage
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # contract tests read Markdown-Viewer/ source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Prepare frontend (dist/) for generate_context!
+        # cargo test compiles lib.rs's generate_context!(), which embeds ../dist
+        # at build time — it must exist or the crate won't compile.
+        run: TAURI_ENV_DEBUG=true sh scripts/prepare-frontend.sh
+
+      - name: JS unit tests (incl. submodule static contract)
+        run: node --test tests/unit/*.mjs
+
+      - name: Rust unit tests
+        run: cargo test --lib --manifest-path src-tauri/Cargo.toml
+
+      - name: Install tarpaulin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      - name: Rust coverage gate (tarpaulin)
+        # Ratchet, not a target. Current lib line coverage is ~38%; the rest is
+        # AppHandle / OS glue (dialogs, eval, Launch Services) that is not
+        # unit-testable and is covered by e2e / manual QA. 35 is a floor that
+        # catches a real regression without flaking on measurement variance.
+        # Raise it as pure-logic coverage grows.
+        run: cargo tarpaulin --lib --manifest-path src-tauri/Cargo.toml --skip-clean --fail-under 35 --out Stdout
+
+# NOTE: e2e (tests/e2e, WebdriverIO) is intentionally NOT run here. It needs a
+# headed WKWebView and shares localStorage with any running prod app, so it
+# stays a local pre-push gate (`npm run test:e2e`), per AGENTS.md Workflow Rules.

@@ -71,9 +71,17 @@ jobs:
 
             Deployed commit: `${{ steps.check.outputs.deployed_sha }}`
 
-            Please verify:
+            Automated (the `Tests` workflow runs on this PR):
+            unit tests (Rust + JS) and the submodule contract tests
+            (`tests/unit/submodule-contract.test.mjs`,
+            `tests/e2e/specs/submodule-contract.spec.js`) fail if this bump
+            renamed/removed an element id, localStorage key, tab class/attr, or
+            the input→render behavior our overrides depend on. Check the PR's
+            CI status before merging.
+
+            Manual verification (CI can't cover these):
             - [ ] App builds successfully
-            - [ ] Live reload works
+            - [ ] Live reload works (edit in a terminal beside the app, no tab switch)
             - [ ] Theme persistence works
             - [ ] No visual regressions
           commit-message: 'chore: update Markdown-Viewer submodule'
