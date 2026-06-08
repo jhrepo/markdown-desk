@@ -165,9 +165,7 @@ pub(crate) fn js_new_tab(content: &str, filename: &str, path: &str) -> String {
             fileInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
             setTimeout(function() {{
                 var editor = document.getElementById('markdown-editor');
-                var preview = document.getElementById('preview');
                 if (editor) {{ editor.scrollTop = 0; }}
-                if (preview) {{ preview.scrollTop = 0; }}
                 window.scrollTo(0, 0);
             }}, 100);
         }})()"#,
@@ -182,6 +180,12 @@ pub(crate) fn js_new_tab(content: &str, filename: &str, path: &str) -> String {
 /// `README.md` open from different directories), where the older title-based
 /// match silently failed because the tab title and the watcher-side display
 /// name diverged once a conflict was introduced.
+///
+/// On content replace we scroll the editor + window to the top but deliberately
+/// leave the preview pane's scroll position alone: on a live-reload edit we
+/// don't want to yank the reader to the top mid-document. (A prior reset looked
+/// up a bare `preview` id that the submodule never defined — the real id is
+/// `markdown-preview` — so it was dead code; removed rather than "fixed".)
 pub(crate) fn js_update_tab(content: &str, path: &str) -> String {
     let js_content = escape_js(content);
     let js_path = escape_js(path);
@@ -200,8 +204,6 @@ pub(crate) fn js_update_tab(content: &str, path: &str) -> String {
                 editor.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 setTimeout(function() {{
                     editor.scrollTop = 0;
-                    var preview = document.getElementById('preview');
-                    if (preview) {{ preview.scrollTop = 0; }}
                     window.scrollTo(0, 0);
                 }}, 100);
             }}

@@ -218,21 +218,41 @@
       });
     }
 
-    // Refresh active tab on tab switch (reads latest file from disk)
+    // Re-read the active tab's file from disk and push the latest content in.
+    // Shared by tab-switch and window-refocus paths. refresh_active_tab is a
+    // no-op when the on-disk content already matches the editor (the Rust side
+    // skips paths outside the watched set, and js_update_tab bails when the
+    // content is unchanged), so calling it speculatively is safe.
+    function refreshActiveFromDisk() {
+      if (!window.__TAURI_INTERNALS__) return;
+      var activeEl = document.querySelector('#tab-list .tab-item.active');
+      var path = activeEl ? activeEl.getAttribute('data-path') : '';
+      if (path) {
+        window.__TAURI_INTERNALS__.invoke('refresh_active_tab', { path: path });
+      }
+    }
+
+    // Refresh active tab on tab switch. The .active class is set asynchronously
+    // after the click, so let it settle before reading data-path.
     var tabList = document.getElementById('tab-list');
     var mobileTabList = document.getElementById('mobile-tab-list');
     function onTabClick() {
-      if (!window.__TAURI_INTERNALS__) return;
-      setTimeout(function() {
-        var activeEl = document.querySelector('#tab-list .tab-item.active');
-        var path = activeEl ? activeEl.getAttribute('data-path') : '';
-        if (path) {
-          window.__TAURI_INTERNALS__.invoke('refresh_active_tab', { path: path });
-        }
-      }, 50);
+      setTimeout(refreshActiveFromDisk, 50);
     }
     if (tabList) { tabList.addEventListener('click', onTabClick); }
     if (mobileTabList) { mobileTabList.addEventListener('click', onTabClick); }
+
+    // Re-sync when the window returns to the foreground. While Markdown Desk is
+    // not frontmost, macOS App Nap can defer the WebView's preview-render timer,
+    // and if the window is minimized/occluded WebKit pauses timers outright — so
+    // a file edited elsewhere may not have rendered yet. Re-reading on
+    // visibility/focus regain reflects it without requiring a tab switch.
+    // (NSAppSleepDisabled in Info.plist keeps live updates flowing while the
+    // window is merely visible-but-not-focused; this covers the hidden cases.)
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) refreshActiveFromDisk();
+    });
+    window.addEventListener('focus', refreshActiveFromDisk);
 
     // Fix mermaid zoom modal SVG sizing for WKWebView
     // WKWebView resolves SVG width:auto to 0 inside flex containers

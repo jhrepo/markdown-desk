@@ -1,7 +1,6 @@
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,6 +62,25 @@ pub(crate) fn should_emit(now_ms: u64, last_ms: u64, debounce_ms: u64) -> bool {
     now_ms.saturating_sub(last_ms) >= debounce_ms
 }
 
+/// Per-file debounce. Returns true (and records `now_ms` for `key`) if enough
+/// time has passed since this key's last emit; false otherwise. Each watched
+/// file is tracked independently so a change to one file never debounce-drops
+/// a near-simultaneous change to another (the old shared `last_emit` did).
+pub(crate) fn check_and_record(
+    map: &mut HashMap<String, u64>,
+    key: &str,
+    now_ms: u64,
+    debounce_ms: u64,
+) -> bool {
+    let last = map.get(key).copied().unwrap_or(0);
+    if should_emit(now_ms, last, debounce_ms) {
+        map.insert(key.to_string(), now_ms);
+        true
+    } else {
+        false
+    }
+}
+
 /// Canonicalize a path and return (key, canonical) where key is the canonical path string.
 pub(crate) fn prepare_file_entry(path: &std::path::Path) -> Result<(String, PathBuf), String> {
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
@@ -103,7 +121,10 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
 
     let app_handle = app.clone();
     let watched_files = Arc::new(files_snapshot.clone());
-    let last_emit = Arc::new(AtomicU64::new(0));
+    // Per-file debounce timestamps (canonical key → last-emit ms). Tracking
+    // each file independently keeps a save to one open file from
+    // debounce-dropping a near-simultaneous change to another.
+    let last_emit: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let mut watcher = RecommendedWatcher::new(
         move |result: Result<notify::Event, notify::Error>| {
@@ -114,10 +135,6 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
                     }
 
                     let now = now_millis();
-                    let last = last_emit.load(Ordering::Relaxed);
-                    if !should_emit(now, last, DEBOUNCE_MS) {
-                        return;
-                    }
 
                     for event_path in &event.paths {
                         let canon = event_path
@@ -126,7 +143,18 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
 
                         for (key, watched_path) in watched_files.iter() {
                             if canon == *watched_path {
-                                last_emit.store(now, Ordering::Relaxed);
+                                // Per-file debounce: skip only if THIS file
+                                // emitted within DEBOUNCE_MS. On lock poison,
+                                // err toward emitting rather than dropping.
+                                let emit = match last_emit.lock() {
+                                    Ok(mut map) => {
+                                        check_and_record(&mut map, key, now, DEBOUNCE_MS)
+                                    }
+                                    Err(_) => true,
+                                };
+                                if !emit {
+                                    return;
+                                }
                                 let display = display_name_from_snapshot(watched_path, &watched_files);
                                 dbg_log!("File changed: {} ({})", display, key);
                                 if let Ok(content) = std::fs::read_to_string(event_path) {
@@ -182,6 +210,7 @@ fn stop_watching(state: &WatcherState) {
 mod tests {
     use super::*;
     use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     // --- WatcherState tests ---
 
@@ -476,5 +505,47 @@ mod tests {
             display_name_from_snapshot(std::path::Path::new("/tmp/c/notes.md"), &files),
             "c/notes.md"
         );
+    }
+
+    // --- check_and_record (per-file debounce) tests ---
+    // Regression guard: the watcher previously shared ONE `last_emit` across
+    // all watched files, so saving file A would debounce-drop a near-simultaneous
+    // change to file B. Per-file tracking must keep each file independent.
+
+    #[test]
+    fn check_and_record_first_call_emits() {
+        let mut map = HashMap::new();
+        assert!(check_and_record(&mut map, "/a.md", 1000, 300));
+        assert_eq!(map.get("/a.md"), Some(&1000));
+    }
+
+    #[test]
+    fn check_and_record_within_debounce_blocked() {
+        let mut map = HashMap::new();
+        map.insert("/a.md".to_string(), 1000);
+        assert!(!check_and_record(&mut map, "/a.md", 1100, 300));
+        // last-emit must NOT advance on a blocked call
+        assert_eq!(map.get("/a.md"), Some(&1000));
+    }
+
+    #[test]
+    fn check_and_record_after_debounce_emits() {
+        let mut map = HashMap::new();
+        map.insert("/a.md".to_string(), 1000);
+        assert!(check_and_record(&mut map, "/a.md", 1300, 300));
+        assert_eq!(map.get("/a.md"), Some(&1300));
+    }
+
+    #[test]
+    fn check_and_record_different_keys_are_independent() {
+        // THE BUG: file A emitting at 1000 must not debounce-drop file B's
+        // change at 1100 (within DEBOUNCE_MS of A). With the old shared
+        // last_emit this returned false; per-file it must emit.
+        let mut map = HashMap::new();
+        map.insert("/a.md".to_string(), 1000);
+        assert!(check_and_record(&mut map, "/b.md", 1100, 300));
+        assert_eq!(map.get("/b.md"), Some(&1100));
+        // A's timestamp is untouched
+        assert_eq!(map.get("/a.md"), Some(&1000));
     }
 }

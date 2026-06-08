@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tauri merges this into the generated macOS Info.plist at bundle time.
+
+  NSAppSleepDisabled: opt out of macOS App Nap. When Markdown Desk is not the
+  frontmost app, App Nap throttles its background timers — including the
+  WebView's debounced preview render (setTimeout → renderMarkdown). The file
+  watcher still fires and the editor text updates synchronously, but the
+  visible preview stays stale until the process is scheduled again (a tab
+  click or refocus). Disabling App Nap lets the render timer fire on schedule
+  so externally-edited files update live while the window is visible-but-not-
+  focused (e.g. editing in a terminal beside Markdown Desk).
+
+  Cost is negligible: the watcher is FSEvents-based (no polling), so the app
+  is idle when not in use even without App Nap.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSAppSleepDisabled</key>
+  <true/>
+</dict>
+</plist>

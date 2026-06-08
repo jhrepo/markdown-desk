@@ -658,4 +658,121 @@ describe('외부 파일 변경 자동 갱신', () => {
       document.getElementById('markdown-editor').dataset.refreshMarker);
     expect(marker).toBe('untouched');
   });
+
+  // ---- foreground-return fallback (bridge.js visibilitychange/focus) ----
+  // When Markdown Desk is not frontmost, macOS App Nap can defer the WebView's
+  // render timer and, when minimized/occluded, WebKit pauses timers outright —
+  // so a file edited elsewhere may not have repainted. bridge.js re-reads the
+  // active tab from disk on `window` focus and on `visibilitychange`
+  // (document.hidden === false) via refreshActiveFromDisk → refresh_active_tab.
+  //
+  // The harness can't reproduce App Nap (any WebDriver probe wakes the WebView),
+  // so we isolate the FALLBACK itself: land the disk content via the watcher,
+  // then clobber the editor IN MEMORY ONLY (no disk write → watcher stays
+  // silent) and fire the foreground event. The only actor that can reconcile
+  // the clobbered editor back to disk is the focus/visibility handler — which
+  // also proves it re-reads CURRENT disk content, not a cached value.
+
+  async function landContentThenClobber(file, landed) {
+    writeFileSync(file, landed);
+    await browser.waitUntil(
+      async () => {
+        const v = await browser.execute(() =>
+          document.getElementById('markdown-editor')?.value || '');
+        return v.trim() === landed.trim();
+      },
+      { timeout: 5000, timeoutMsg: 'precondition: watcher did not land content before clobber' }
+    );
+    // In-memory clobber: NO file write, NO input dispatch → nothing but the
+    // foreground handler can restore it.
+    await browser.execute(() => {
+      document.getElementById('markdown-editor').value = '__STALE_CLOBBER__';
+    });
+  }
+
+  it('window focus 시 활성 탭이 현재 디스크 내용으로 재동기화된다', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'md-ar-focus-'));
+    const raw = join(dir, 'focus.md');
+    writeFileSync(raw, '# v0\n');
+    const file = realpathSync(raw);
+    await seedSession([{ title: 'focus.md', content: '# v0\n' }], [file]);
+
+    const landed = '# focus disk ' + Date.now() + '\n';
+    await landContentThenClobber(file, landed);
+
+    await browser.execute(() => window.dispatchEvent(new Event('focus')));
+
+    await browser.waitUntil(
+      async () => {
+        const v = await browser.execute(() =>
+          document.getElementById('markdown-editor')?.value || '');
+        return v.trim() === landed.trim();
+      },
+      { timeout: 5000, timeoutMsg: 'focus did not re-sync the editor from disk' }
+    );
+  });
+
+  it('visibilitychange(hidden=false) 시 활성 탭이 디스크 내용으로 재동기화된다', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'md-ar-vis-'));
+    const raw = join(dir, 'vis.md');
+    writeFileSync(raw, '# v0\n');
+    const file = realpathSync(raw);
+    await seedSession([{ title: 'vis.md', content: '# v0\n' }], [file]);
+
+    const landed = '# vis disk ' + Date.now() + '\n';
+    await landContentThenClobber(file, landed);
+
+    // document.hidden is false in the harness (window visible), so the handler's
+    // `if (!document.hidden)` guard passes and refreshActiveFromDisk runs.
+    await browser.execute(() =>
+      document.dispatchEvent(new Event('visibilitychange')));
+
+    await browser.waitUntil(
+      async () => {
+        const v = await browser.execute(() =>
+          document.getElementById('markdown-editor')?.value || '');
+        return v.trim() === landed.trim();
+      },
+      { timeout: 5000, timeoutMsg: 'visibilitychange did not re-sync the editor from disk' }
+    );
+  });
+
+  it('focus 시 활성 탭에 data-path 가 없으면 refresh_active_tab 을 호출하지 않는다', async () => {
+    // The Welcome tab has no data-path. refreshActiveFromDisk must short-circuit
+    // (the `if (path)` guard) so we don't spam the IPC with an empty path or
+    // hand the Rust side a non-watched path. Spy on invoke to prove no call.
+    const pre = await browser.execute(() => {
+      const a = document.querySelector('#tab-list .tab-item.active');
+      return a ? (a.getAttribute('data-path') || '') : 'NO_ACTIVE';
+    });
+    expect(pre).toBe(''); // welcome tab: active, but no data-path
+
+    await browser.execute(() => {
+      window.__refreshSpyCalls = [];
+      const orig = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.__origInvoke = orig;
+      window.__TAURI_INTERNALS__.invoke = function (cmd) {
+        if (cmd === 'refresh_active_tab') window.__refreshSpyCalls.push(arguments[1]);
+        return orig.apply(this, arguments);
+      };
+    });
+
+    try {
+      await browser.execute(() => window.dispatchEvent(new Event('focus')));
+      await browser.execute(() =>
+        document.dispatchEvent(new Event('visibilitychange')));
+      await browser.pause(250);
+      const calls = await browser.execute(() => (window.__refreshSpyCalls || []).length);
+      expect(calls).toBe(0);
+    } finally {
+      // Always restore the real invoke, even if the assertion above throws,
+      // so a failure here can't cascade into later specs.
+      await browser.execute(() => {
+        if (window.__TAURI_INTERNALS__.__origInvoke) {
+          window.__TAURI_INTERNALS__.invoke = window.__TAURI_INTERNALS__.__origInvoke;
+          delete window.__TAURI_INTERNALS__.__origInvoke;
+        }
+      });
+    }
+  });
 });

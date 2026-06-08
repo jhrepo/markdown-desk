@@ -124,6 +124,37 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - `scripts/prepare-frontend.sh` — 빌드 시 서브모듈을 `dist/` 로 복사, bridge.js / bridge-helpers.js / toc.js 주입. 릴리즈 빌드에선 `@dev-hook` 블록 strip.
 - `Markdown-Viewer/` — 원본 웹 앱 (서브모듈, 수정 금지)
 
+## Submodule Coupling (서브모듈 결합 지점)
+
+우리 오버라이드(bridge.js / toc.js / commands.rs)는 서브모듈 DOM에 4종으로
+결합한다. 서브모듈 업데이트가 이 중 하나라도 바꾸면 조용한 no-op으로 깨진다.
+
+- Element id  : `#markdown-editor`(라이브리로드 sink), `#markdown-preview`(렌더/TOC),
+               `#file-input`(열기), `#tab-list`, `#mobile-tab-list`, mermaid/reset 계열
+- localStorage: `markdownViewerTabs`, `markdownViewerActiveTab`
+- 탭 class/attr: `.tab-item` / `.tab-item.active` / `.tab-title` / `data-tab-id`
+- 동작 계약   : editor `input` → 서브모듈 `debouncedRender` → `#markdown-preview`
+               재렌더 (라이브리로드의 핵심). `renderMarkdown` 은 서브모듈
+               `DOMContentLoaded` 클로저 내부라 직접 호출 불가.
+
+**결합 지점의 single source of truth 는 이 문서가 아니라 계약 테스트다:**
+- `tests/unit/submodule-contract.test.mjs`   (정적: id/키/토큰 + commands.rs 교차언어)
+- `tests/e2e/specs/submodule-contract.spec.js` (동작: input→렌더 등)
+
+새 세션에서 결합 지점을 파악하려면 위 두 파일을 먼저 읽는다. (위 목록은 방향타일 뿐 —
+정확한 현재 목록은 테스트가 검증한다.)
+
+**재추출 레시피:**
+
+```bash
+grep -rhoE "getElementById\('[^']+'\)" scripts/bridge.js scripts/toc.js src-tauri/src/commands.rs | sort -u
+grep -rhoE "querySelector(All)?\('#[^']+'\)" scripts src-tauri/src/commands.rs | sort -u
+```
+
+**서브모듈 bump 절차:** 먼저 `node --test tests/unit/submodule-contract.test.mjs`
+→ 실패하면 소비자(bridge/toc/commands)와 테스트 기대치를 같은 커밋에서 함께
+갱신한다. 테스트만 느슨하게 풀지 말 것.
+
 ## Key Rules
 
 - 원본 `Markdown-Viewer/` 서브모듈은 절대 직접 수정하지 않음
