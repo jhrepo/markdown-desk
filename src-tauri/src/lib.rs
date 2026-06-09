@@ -503,6 +503,23 @@ mod bridge_script_tests {
         assert!(s.contains("hardReload()"), "Cmd+R must call hardReload");
     }
 
+    #[test]
+    fn hard_reload_resets_rust_watcher_state() {
+        let s = bridge_js();
+        // Reset button + Cmd+R both route through hardReload(). Clearing
+        // localStorage drops the JS-side watched-paths list, but the Rust
+        // WatcherState survives the webview reload — location.reload()
+        // reloads the page, it does not restart the process. Without the
+        // reset_watcher IPC, JS (empty list) and Rust (still watching the
+        // pre-Reset files) diverge and FSEvents watches accumulate across
+        // Resets within a session. hardReload must clear the Rust side too.
+        let body = slice_fn_body(&s, "hardReload");
+        assert!(
+            body.contains("invoke('reset_watcher')"),
+            "hardReload must invoke 'reset_watcher' to clear Rust WatcherState"
+        );
+    }
+
     // --- Live-reload stamping race guards ------------------------------
     // These pin the cold-start fix from this change. Without them,
     // bridgeStampTabPath's `firstSeen` flag could be deleted by a future

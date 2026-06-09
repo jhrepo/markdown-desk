@@ -615,7 +615,19 @@
         return origSetItem.call(this, k, v);
       };
     } catch (e) {}
-    window.location.reload();
+    // Clearing localStorage above drops the JS watched-paths list, but the
+    // Rust WatcherState lives in the process and outlives this reload — so
+    // it would keep watching the just-reset files (JS↔Rust state divergence,
+    // and FSEvents watches accumulating across Resets within one session).
+    // Clear it via the same reset_watcher IPC the e2e isolation uses. invoke
+    // posts the message synchronously, so the reload below can't race it;
+    // reload regardless of resolve/reject so a failed IPC can't strand Reset.
+    var reload = function () { window.location.reload(); };
+    if (window.__TAURI_INTERNALS__) {
+      window.__TAURI_INTERNALS__.invoke('reset_watcher').then(reload, reload);
+    } else {
+      reload();
+    }
   }
 
   // --- Export overrides: use Tauri native save dialog instead of browser download ---
