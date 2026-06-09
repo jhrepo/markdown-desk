@@ -600,6 +600,21 @@
     localStorage.clear();
     if (globalState) localStorage.setItem(GLOBAL_STATE_KEY, globalState);
     if (dismissed) localStorage.setItem(DEFAULT_APP_DISMISSED_KEY, dismissed);
+    // Markdown-Viewer 3.7.x (PERF-008) flushes its in-memory `tabs` array to
+    // markdownViewerTabs on `beforeunload`. The reload below fires that flush,
+    // which would write the just-cleared session straight back and defeat the
+    // reset (the open documents would survive). Suppress writes to the two
+    // tab-session keys for the remainder of this about-to-be-discarded page so
+    // the reset actually clears the tabs. Scoped to those keys so the
+    // globalState/dismissed restores above (and any other write) still persist;
+    // the override dies with the page on reload.
+    try {
+      var origSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) {
+        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
+        return origSetItem.call(this, k, v);
+      };
+    } catch (e) {}
     window.location.reload();
   }
 

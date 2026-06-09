@@ -179,6 +179,19 @@ describe('자동 갱신 - cold start (Welcome + 새 파일 race 포함)', () => 
     await browser.execute(() => {
       try { localStorage.clear(); } catch {}
       try { delete window.__bridgeTabPaths; } catch {}
+      // Markdown-Viewer 3.7.x (PERF-008) flushes the in-memory `tabs` array to
+      // markdownViewerTabs on `beforeunload`. Without suppressing it, the
+      // reload below resurrects the PREVIOUS test's tabs over the just-cleared
+      // session — so the "truly cold" precondition (Welcome tab only) breaks
+      // and the batch/multi-tab scenarios see stale extra tabs. Freeze writes
+      // to the tab-session keys until the reload discards this patch.
+      try {
+        var origSet = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (k, v) {
+          if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
+          return origSet.call(this, k, v);
+        };
+      } catch (e) {}
       window.location.reload();
     });
     // Poll for: document fully loaded, bridge.js's DOMContentLoaded hook

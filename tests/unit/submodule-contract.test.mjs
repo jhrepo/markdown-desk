@@ -34,6 +34,7 @@ const SUBMODULE_DIR = resolve(REPO_ROOT, 'Markdown-Viewer');
 const INDEX_HTML = resolve(SUBMODULE_DIR, 'index.html');
 const SCRIPT_JS = resolve(SUBMODULE_DIR, 'script.js');
 const COMMANDS_RS = resolve(REPO_ROOT, 'src-tauri', 'src', 'commands.rs');
+const PREPARE_FRONTEND = resolve(REPO_ROOT, 'scripts', 'prepare-frontend.sh');
 
 // Fail loudly (not silently skip) if the submodule isn't checked out: the
 // build needs it too, so an uninitialized submodule must break CI here.
@@ -261,5 +262,81 @@ test('script.js still renders the tab class/attr tokens bridge.js selects on', (
     /'tab-item'\s*\+\s*\([^)]*\?\s*' active'/,
     "Submodule no longer appends ' active' to the active tab's className. " +
       'bridge.js refreshActiveFromDisk and the watcher select `.tab-item.active`.'
+  );
+});
+
+// ---------------- build-asset contract (prepare-frontend.sh) ----------------
+// Our build copies only a fixed set of submodule files into dist/
+// (scripts/prepare-frontend.sh: index.html, script.js, styles.css, assets/).
+// When a submodule bump makes script.js load a NEW sibling .js at runtime —
+// a Web Worker (`new Worker`), a worker URL builder (`new URL("x.js", …)`), or
+// `importScripts(...)` — that file is a hard runtime dependency: if it isn't in
+// the copy list it 404s in the WebView. The preview pipeline's worker
+// (preview-worker.js, added in the 3.7.x render re-engineering) degrades
+// silently this way — large-doc rendering falls back to the main thread after
+// the worker errors out, with console noise and a first-render stall.
+//
+// This is intentionally scoped to Worker/URL/importScripts loads, NOT every
+// asset: <link rel="manifest"> and navigator.serviceWorker.register('sw.js')
+// are PWA niceties that are inert/guarded in a Tauri shell, so we deliberately
+// do not bundle them (a 404 there is harmless). A Worker is different — it is
+// load-bearing for rendering — so it must be copied.
+
+function extractWorkerJsAssets(source) {
+  const assets = new Set();
+  const patterns = [
+    /new\s+Worker\(\s*['"]([^'"]+\.js)['"]/g, // direct literal Worker URL
+    /new\s+URL\(\s*['"]([^'"]+\.js)['"]/g,     // worker URL builder (getPreviewWorkerUrl)
+    /importScripts\(\s*['"]([^'"]+\.js)['"]/g, // inside-worker style loads
+  ];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(source)) !== null) {
+      const ref = m[1];
+      // Sibling files only: skip absolute/CDN URLs (https://…) and nested
+      // paths — prepare-frontend.sh copies into dist/ root next to script.js,
+      // so only same-dir bare filenames are in scope.
+      if (ref.includes('://') || ref.includes('/')) continue;
+      assets.add(ref);
+    }
+  }
+  return [...assets];
+}
+
+// True if prepare-frontend.sh copies `$SUBMODULE_DIR/<file>` into the frontend
+// dir (matches both `cp` and `cp -r`, single file or glob-free explicit copy).
+function prepareFrontendCopies(sh, file) {
+  const re = new RegExp(`cp\\b[^\\n]*\\$SUBMODULE_DIR/${escapeRe(file)}\\b`);
+  return re.test(sh);
+}
+
+test('prepare-frontend.sh bundles every worker .js the submodule loads at runtime', () => {
+  const js = readSubmoduleFile(SCRIPT_JS, 'script.js');
+  const sh = readSubmoduleFile(PREPARE_FRONTEND, 'prepare-frontend.sh');
+  const workerAssets = extractWorkerJsAssets(js);
+
+  // Sanity / regex-rot guard: this submodule version is known to load
+  // preview-worker.js via getPreviewWorkerUrl (`new URL("preview-worker.js")`).
+  // If this fails, either the worker was renamed/removed upstream (update the
+  // copy list AND this expectation in the same commit) or the extractor regex
+  // rotted and is silently finding nothing.
+  assert.ok(
+    workerAssets.includes('preview-worker.js'),
+    `Expected script.js to load preview-worker.js as a Worker, but the ` +
+      `extractor found: ${JSON.stringify(workerAssets)}.\n` +
+      `  If upstream renamed/removed the preview worker, update ` +
+      `scripts/prepare-frontend.sh and this test together.`
+  );
+
+  const notCopied = workerAssets.filter((f) => !prepareFrontendCopies(sh, f));
+  assert.deepEqual(
+    notCopied,
+    [],
+    `script.js loads worker file(s) that scripts/prepare-frontend.sh does not ` +
+      `copy into dist/: ${JSON.stringify(notCopied)}.\n` +
+      `  These 404 in the WebView; the preview pipeline then errors out and ` +
+      `falls back to main-thread rendering (console noise + first-render stall ` +
+      `on large docs). Fix: add \`cp "$SUBMODULE_DIR/<file>" "$FRONTEND_DIR/"\` ` +
+      `to prepare-frontend.sh.`
   );
 });

@@ -64,4 +64,45 @@ describe('Reset 버튼', () => {
 
     expect(testVal).toBeNull();
   });
+
+  it('Reset 후 탭 세션(markdownViewerTabs)이 초기화된다 — beforeunload flush 가 되살리지 않는다', async function () {
+    // Regression guard for Markdown-Viewer 3.7.x (PERF-008): the submodule now
+    // flushes its in-memory `tabs` array to markdownViewerTabs on `beforeunload`.
+    // bridge.js hardReload() clears localStorage and immediately reloads, so
+    // that flush would write the just-cleared tabs straight back — Reset would
+    // no longer reset the open documents. bridge.js must suppress the tab-key
+    // flush across the reset reload.
+    const resetBtn = await $('#tab-reset-btn');
+    if (!(await resetBtn.isExisting())) return this.skip();
+
+    // Land a distinctive marker into the active tab AND the in-memory `tabs`
+    // array via the app's own save path (input → saveCurrentTabState, 500ms
+    // debounce). The marker in `tabs` is exactly what the beforeunload flush
+    // would resurrect.
+    const marker = 'RESET_TAB_MARKER_' + Date.now();
+    await browser.execute((m) => {
+      const ed = document.getElementById('markdown-editor');
+      ed.value = m;
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+    }, marker);
+
+    await browser.waitUntil(
+      async () => {
+        const tabs = await browser.execute(
+          () => localStorage.getItem('markdownViewerTabs') || ''
+        );
+        return tabs.includes(marker);
+      },
+      { timeout: 4000, timeoutMsg: 'precondition: marker not persisted to markdownViewerTabs' }
+    );
+
+    await resetBtn.click();
+    await browser.pause(2500);
+
+    // The reset session must not contain the pre-reset marker.
+    const after = await browser.execute(
+      () => localStorage.getItem('markdownViewerTabs') || ''
+    );
+    expect(after.includes(marker)).toBe(false);
+  });
 });

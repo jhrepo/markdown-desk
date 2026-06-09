@@ -42,6 +42,17 @@ describe('외부 파일 변경 자동 갱신', () => {
       const m = {};
       list.forEach((t, i) => { m[t.id] = paths[i]; });
       localStorage.setItem('bridge-tab-paths', JSON.stringify(m));
+      // Markdown-Viewer 3.7.x (PERF-008) flushes the in-memory `tabs` array to
+      // markdownViewerTabs on `beforeunload`. The reload below would otherwise
+      // fire that flush and clobber the seed we just wrote with the previous
+      // page's stale tabs. Freeze writes to the tab-session keys until reload
+      // swaps the JS context (which discards this patch). Other keys still
+      // persist normally.
+      const origSet = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) {
+        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
+        return origSet.call(this, k, v);
+      };
     }, seedTabs, watchedPaths);
     await browser.execute(() => window.location.reload());
     await browser.pause(2500);
@@ -489,6 +500,13 @@ describe('외부 파일 변경 자동 갱신', () => {
         [id]: paths[0],
         'tab_stale_long_gone': '/tmp/already/closed.md',
       }));
+      // Freeze tab-session writes so the new submodule's beforeunload flush
+      // (PERF-008) doesn't clobber this seed on the reload below.
+      const origSet = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) {
+        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
+        return origSet.call(this, k, v);
+      };
     }, [{ title: 'live.md', content: '# live\n' }], [file]);
     await browser.execute(() => window.location.reload());
     await browser.pause(2500);

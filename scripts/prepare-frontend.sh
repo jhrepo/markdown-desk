@@ -16,6 +16,17 @@ cp "$SUBMODULE_DIR/script.js" "$FRONTEND_DIR/"
 cp "$SUBMODULE_DIR/styles.css" "$FRONTEND_DIR/"
 cp -r "$SUBMODULE_DIR/assets" "$FRONTEND_DIR/" 2>/dev/null || true
 
+# Preview rendering worker (added in Markdown-Viewer 3.7.x). script.js loads it
+# via `new Worker(new URL("preview-worker.js", …))` for large documents
+# (>= 50KB). It is load-bearing: if it 404s the preview pipeline errors out and
+# falls back to main-thread rendering with console noise + a first-render stall.
+# Hard copy (no `|| true`) so a renamed/missing worker fails the build loudly
+# rather than silently degrading at runtime. The tests/unit submodule contract
+# (`prepare-frontend.sh bundles every worker .js …`) pins this coupling.
+# NOTE: sw.js (service worker) and manifest.json are intentionally NOT copied —
+# they are PWA niceties that are inert/guarded inside the Tauri shell.
+cp "$SUBMODULE_DIR/preview-worker.js" "$FRONTEND_DIR/"
+
 # Copy bridge script and inject app version
 cp "$SCRIPT_DIR/bridge.js" "$FRONTEND_DIR/"
 cp "$SCRIPT_DIR/bridge-helpers.js" "$FRONTEND_DIR/"
