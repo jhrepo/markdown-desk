@@ -530,6 +530,20 @@ pub fn open_release_page(version: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Escape a string for interpolation **inside a JS template literal** (a backtick
+/// string) — the only context every caller uses (`js_new_tab` / `js_update_tab` /
+/// `js_add_watched_path` all splice the result into `` `{}` ``).
+///
+/// It neutralizes backslash, backtick, and `${` (so the value can't break out of
+/// the literal or inject an interpolation), normalizes CR/LF, and defensively
+/// rewrites `</` so the result can't terminate a `<script>` tag early. It does
+/// NOT escape `'` / `"` (legal inside a template literal) nor U+2028 / U+2029
+/// (legal in ES2019+ string literals).
+///
+/// CONTRACT: only safe inside a template literal. Do NOT splice the result into a
+/// single/double-quoted JS string, a regex, an HTML attribute, or any other
+/// non-literal context — those need additional escaping. Moving a call to such a
+/// context re-arms an injection and must add the missing escapes here or locally.
 pub(crate) fn escape_js(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('`', "\\`")

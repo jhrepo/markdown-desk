@@ -62,23 +62,76 @@ pub(crate) fn should_emit(now_ms: u64, last_ms: u64, debounce_ms: u64) -> bool {
     now_ms.saturating_sub(last_ms) >= debounce_ms
 }
 
-/// Per-file debounce. Returns true (and records `now_ms` for `key`) if enough
-/// time has passed since this key's last emit; false otherwise. Each watched
-/// file is tracked independently so a change to one file never debounce-drops
-/// a near-simultaneous change to another (the old shared `last_emit` did).
-pub(crate) fn check_and_record(
-    map: &mut HashMap<String, u64>,
-    key: &str,
+/// Match each path in a single notify event against the watched set and return
+/// the canonical watched keys to consider reloading — deduped (a path delivered
+/// twice in one event counts once) and in first-seen order. This is matching
+/// ONLY: no debounce, no read, no side effects. Debounce gating and reading
+/// happen in `process_candidates`, so a path that matches but can't be read never
+/// records a debounce timestamp.
+///
+/// notify can batch several changed paths into one event (it commonly does when
+/// they share a parent directory — and we always watch parent dirs). Each path is
+/// matched independently so a non-match never aborts the rest. A deleted/
+/// renamed-away watched path still canonicalizes to itself (the fallback) and so
+/// still matches here — that's intended; the read in `process_candidates` is what
+/// then fails harmlessly and lets a follow-up recreate retry.
+pub(crate) fn collect_candidates(
+    event_paths: &[PathBuf],
+    watched_files: &HashMap<String, PathBuf>,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    for event_path in event_paths {
+        let canon = event_path
+            .canonicalize()
+            .unwrap_or_else(|_| event_path.clone());
+        for (key, watched_path) in watched_files.iter() {
+            if canon == *watched_path {
+                if !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+                break;
+            }
+        }
+    }
+    keys
+}
+
+/// Gate each candidate key on its OWN debounce window, attempt a read via `read`,
+/// and record the debounce timestamp ONLY after a successful read. Returns the
+/// `(canonical_key, content)` to deliver, in candidate order.
+///
+/// Recording the debounce timestamp AFTER a successful read (not at match time)
+/// is the crux: a `Modify(Name)`/delete delivered for a watched path still matches
+/// the watched set (canonicalize falls back to the path as-is), but the read then
+/// fails. If we recorded the debounce at match time, a recreate/modify arriving
+/// within `debounce_ms` would be dropped — the editor would keep stale content,
+/// and a later Cmd+S could overwrite the external change. By recording only on a
+/// successful read, a failed read never consumes the debounce window, so the next
+/// event for the same key is still delivered. The debounce CHECK still runs before
+/// the read so a burst of successful duplicate events for one save emits once.
+pub(crate) fn process_candidates<F>(
+    candidates: &[String],
+    last_emit: &mut HashMap<String, u64>,
     now_ms: u64,
     debounce_ms: u64,
-) -> bool {
-    let last = map.get(key).copied().unwrap_or(0);
-    if should_emit(now_ms, last, debounce_ms) {
-        map.insert(key.to_string(), now_ms);
-        true
-    } else {
-        false
+    mut read: F,
+) -> Vec<(String, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut emits = Vec::new();
+    for key in candidates {
+        let last = last_emit.get(key).copied().unwrap_or(0);
+        if !should_emit(now_ms, last, debounce_ms) {
+            continue;
+        }
+        if let Some(content) = read(key) {
+            last_emit.insert(key.clone(), now_ms);
+            emits.push((key.clone(), content));
+        }
+        // Read failed → do NOT record; let the next event for this key retry.
     }
+    emits
 }
 
 /// Canonicalize a path and return (key, canonical) where key is the canonical path string.
@@ -136,38 +189,44 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
 
                     let now = now_millis();
 
-                    for event_path in &event.paths {
-                        let canon = event_path
-                            .canonicalize()
-                            .unwrap_or_else(|_| event_path.clone());
+                    // Match this event's paths to the watched set (deduped),
+                    // independent of debounce/read so a non-match or an unreadable
+                    // path never aborts the rest.
+                    let candidates = collect_candidates(&event.paths, &watched_files);
 
-                        for (key, watched_path) in watched_files.iter() {
-                            if canon == *watched_path {
-                                // Per-file debounce: skip only if THIS file
-                                // emitted within DEBOUNCE_MS. On lock poison,
-                                // err toward emitting rather than dropping.
-                                let emit = match last_emit.lock() {
-                                    Ok(mut map) => {
-                                        check_and_record(&mut map, key, now, DEBOUNCE_MS)
-                                    }
-                                    Err(_) => true,
-                                };
-                                if !emit {
-                                    return;
-                                }
-                                let display = display_name_from_snapshot(watched_path, &watched_files);
-                                dbg_log!("File changed: {} ({})", display, key);
-                                if let Ok(content) = std::fs::read_to_string(event_path) {
-                                    // Match key is the canonical path string —
-                                    // bridge.js stores it on `data-path`. The
-                                    // display name is for the tab title only.
-                                    crate::commands::update_current_tab(
-                                        &app_handle, &content, key,
-                                    );
-                                }
-                                return;
-                            }
+                    // Read the CANONICAL watched path for a matched key (not the
+                    // delivered event path), so we always load the file the tab
+                    // represents.
+                    let read = |key: &str| {
+                        watched_files
+                            .get(key)
+                            .and_then(|p| std::fs::read_to_string(p).ok())
+                    };
+
+                    // Gate each candidate on its own debounce window; the debounce
+                    // timestamp is recorded only after a successful read, so a
+                    // rename-away/delete whose read fails doesn't suppress a
+                    // follow-up recreate. On lock poison, err toward emitting: a
+                    // throwaway map + zero debounce so every candidate is tried.
+                    let emits = match last_emit.lock() {
+                        Ok(mut map) => {
+                            process_candidates(&candidates, &mut map, now, DEBOUNCE_MS, read)
                         }
+                        Err(_) => {
+                            let mut scratch = HashMap::new();
+                            process_candidates(&candidates, &mut scratch, now, 0, read)
+                        }
+                    };
+
+                    for (key, content) in emits {
+                        // Match key is the canonical path string — bridge.js
+                        // stores it on `data-path`. The display name is for the
+                        // tab title only.
+                        if let Some(watched_path) = watched_files.get(&key) {
+                            let display = display_name_from_snapshot(watched_path, &watched_files);
+                            dbg_log!("File changed: {} ({})", display, key);
+                        }
+                        crate::commands::update_current_tab(&app_handle, &content, &key);
                     }
                 }
                 Err(e) => dbg_log!("Watcher error: {}", e),
@@ -507,45 +566,214 @@ mod tests {
         );
     }
 
-    // --- check_and_record (per-file debounce) tests ---
-    // Regression guard: the watcher previously shared ONE `last_emit` across
-    // all watched files, so saving file A would debounce-drop a near-simultaneous
-    // change to file B. Per-file tracking must keep each file independent.
+    // Shared helper for the matching tests. Paths that don't exist on disk make
+    // canonicalize() fall back to the path as-is, so matching against an equal
+    // PathBuf works without touching the filesystem — this also mirrors the
+    // deleted/rename-away case where the watched path no longer resolves.
+    fn watched(paths: &[&str]) -> HashMap<String, PathBuf> {
+        paths
+            .iter()
+            .map(|p| (p.to_string(), PathBuf::from(p)))
+            .collect()
+    }
+
+    // --- collect_candidates (per-event matching + dedup, no debounce/read) tests ---
 
     #[test]
-    fn check_and_record_first_call_emits() {
-        let mut map = HashMap::new();
-        assert!(check_and_record(&mut map, "/a.md", 1000, 300));
-        assert_eq!(map.get("/a.md"), Some(&1000));
+    fn collect_candidates_single_watched_path() {
+        let w = watched(&["/x/a.md"]);
+        let c = collect_candidates(&[PathBuf::from("/x/a.md")], &w);
+        assert_eq!(c, vec!["/x/a.md".to_string()]);
     }
 
     #[test]
-    fn check_and_record_within_debounce_blocked() {
-        let mut map = HashMap::new();
-        map.insert("/a.md".to_string(), 1000);
-        assert!(!check_and_record(&mut map, "/a.md", 1100, 300));
-        // last-emit must NOT advance on a blocked call
-        assert_eq!(map.get("/a.md"), Some(&1000));
+    fn collect_candidates_two_paths_one_event_both_match() {
+        let w = watched(&["/x/a.md", "/x/b.md"]);
+        let c = collect_candidates(&[PathBuf::from("/x/a.md"), PathBuf::from("/x/b.md")], &w);
+        assert_eq!(c.len(), 2);
+        assert!(c.contains(&"/x/a.md".to_string()));
+        assert!(c.contains(&"/x/b.md".to_string()));
     }
 
     #[test]
-    fn check_and_record_after_debounce_emits() {
-        let mut map = HashMap::new();
-        map.insert("/a.md".to_string(), 1000);
-        assert!(check_and_record(&mut map, "/a.md", 1300, 300));
-        assert_eq!(map.get("/a.md"), Some(&1300));
+    fn collect_candidates_unwatched_path_filtered_out() {
+        // An unwatched sibling in the same event must be skipped without aborting
+        // the watched one.
+        let w = watched(&["/x/b.md"]);
+        let c = collect_candidates(&[PathBuf::from("/x/junk.tmp"), PathBuf::from("/x/b.md")], &w);
+        assert_eq!(c, vec!["/x/b.md".to_string()]);
     }
 
     #[test]
-    fn check_and_record_different_keys_are_independent() {
-        // THE BUG: file A emitting at 1000 must not debounce-drop file B's
-        // change at 1100 (within DEBOUNCE_MS of A). With the old shared
-        // last_emit this returned false; per-file it must emit.
-        let mut map = HashMap::new();
-        map.insert("/a.md".to_string(), 1000);
-        assert!(check_and_record(&mut map, "/b.md", 1100, 300));
-        assert_eq!(map.get("/b.md"), Some(&1100));
-        // A's timestamp is untouched
-        assert_eq!(map.get("/a.md"), Some(&1000));
+    fn collect_candidates_duplicate_path_deduped() {
+        // Same watched path twice in one event → one candidate (we don't want to
+        // read + render the same file twice for a single event).
+        let w = watched(&["/x/a.md"]);
+        let c = collect_candidates(&[PathBuf::from("/x/a.md"), PathBuf::from("/x/a.md")], &w);
+        assert_eq!(c, vec!["/x/a.md".to_string()]);
+    }
+
+    #[test]
+    fn collect_candidates_preserves_first_seen_order() {
+        let w = watched(&["/x/a.md", "/x/b.md"]);
+        let c = collect_candidates(&[PathBuf::from("/x/b.md"), PathBuf::from("/x/a.md")], &w);
+        assert_eq!(c, vec!["/x/b.md".to_string(), "/x/a.md".to_string()]);
+    }
+
+    #[test]
+    fn collect_candidates_empty_paths() {
+        let w = watched(&["/x/a.md"]);
+        assert!(collect_candidates(&[], &w).is_empty());
+    }
+
+    #[test]
+    fn collect_candidates_no_watched_files() {
+        let w = HashMap::new();
+        assert!(collect_candidates(&[PathBuf::from("/x/a.md")], &w).is_empty());
+    }
+
+    // --- process_candidates (debounce gating + read-then-record) tests ---
+
+    #[test]
+    fn process_candidates_failed_read_does_not_consume_debounce() {
+        // THE BUG: a rename-away/delete delivered for a watched path matches the
+        // watched set (canonicalize fallback), but the read then fails. If we
+        // record the debounce timestamp at match time (before the read), a
+        // recreate within DEBOUNCE_MS is dropped → editor stays stale → a later
+        // Cmd+S can overwrite the external change with old content. A failed read
+        // must NOT consume the debounce window, so the recreate still emits.
+        let mut last = HashMap::new();
+        // Event 1: rename-away — read fails.
+        let emits1 = process_candidates(&["/x/d.md".to_string()], &mut last, 1000, 300, |_k| None);
+        assert!(emits1.is_empty());
+        assert_eq!(
+            last.get("/x/d.md"),
+            None,
+            "a failed read must not record a debounce timestamp"
+        );
+        // Event 2: recreate 100ms later (within 300ms) — read succeeds → emits.
+        let emits2 = process_candidates(&["/x/d.md".to_string()], &mut last, 1100, 300, |_k| {
+            Some("new content".to_string())
+        });
+        assert_eq!(
+            emits2,
+            vec![("/x/d.md".to_string(), "new content".to_string())]
+        );
+        assert_eq!(last.get("/x/d.md"), Some(&1100));
+    }
+
+    #[test]
+    fn process_candidates_successful_read_emits_and_records() {
+        let mut last = HashMap::new();
+        let emits = process_candidates(&["/x/a.md".to_string()], &mut last, 1000, 300, |_k| {
+            Some("hello".to_string())
+        });
+        assert_eq!(emits, vec![("/x/a.md".to_string(), "hello".to_string())]);
+        assert_eq!(last.get("/x/a.md"), Some(&1000));
+    }
+
+    #[test]
+    fn process_candidates_debounced_candidate_is_not_read() {
+        // A candidate still inside its debounce window must be skipped WITHOUT
+        // reading (the read check comes after the debounce gate), and its
+        // timestamp must not advance.
+        let mut last = HashMap::new();
+        last.insert("/x/a.md".to_string(), 900);
+        let mut reads = 0;
+        let emits = process_candidates(&["/x/a.md".to_string()], &mut last, 1000, 300, |_k| {
+            reads += 1;
+            Some("x".to_string())
+        });
+        assert!(emits.is_empty());
+        assert_eq!(reads, 0, "a debounced candidate must not be read");
+        assert_eq!(last.get("/x/a.md"), Some(&900));
+    }
+
+    #[test]
+    fn process_candidates_independent_keys_one_debounced_one_fresh() {
+        // A is debounced (won't read/emit), B is fresh (reads/emits). Keys are
+        // gated independently — A must not suppress B.
+        let mut last = HashMap::new();
+        last.insert("/x/a.md".to_string(), 900);
+        let emits = process_candidates(
+            &["/x/a.md".to_string(), "/x/b.md".to_string()],
+            &mut last,
+            1000,
+            300,
+            |key| Some(format!("content:{}", key)),
+        );
+        assert_eq!(
+            emits,
+            vec![("/x/b.md".to_string(), "content:/x/b.md".to_string())]
+        );
+        assert_eq!(last.get("/x/a.md"), Some(&900)); // unchanged
+        assert_eq!(last.get("/x/b.md"), Some(&1000));
+    }
+
+    #[test]
+    fn process_candidates_burst_of_successful_events_emits_once() {
+        // Three successful events for one save within the debounce window emit
+        // exactly once (the debounce CHECK still runs before the read).
+        let mut last = HashMap::new();
+        let mut total = Vec::new();
+        for now in [1000u64, 1100, 1200] {
+            let e =
+                process_candidates(&["/x/a.md".to_string()], &mut last, now, 300, |_k| {
+                    Some("v".to_string())
+                });
+            total.extend(e);
+        }
+        assert_eq!(total, vec![("/x/a.md".to_string(), "v".to_string())]);
+        assert_eq!(last.get("/x/a.md"), Some(&1000));
+    }
+
+    #[test]
+    fn process_candidates_empty_candidates() {
+        let mut last = HashMap::new();
+        let emits = process_candidates(&[], &mut last, 1000, 300, |_k| Some("x".to_string()));
+        assert!(emits.is_empty());
+        assert!(last.is_empty());
+    }
+
+    // --- Info.plist App Nap opt-out (build-config tripwire) ---
+    // The "live reload while the window is visible-but-not-focused" feature has
+    // two halves: the focus/visibility fallback (auto-refresh.spec.js) and
+    // disabling macOS App Nap so the WebView's debounced render timer keeps firing
+    // in the background. The App Nap half lives ONLY in the bundled Info.plist —
+    // no unit/e2e exercises it — so a deletion or typo would silently regress in
+    // production. These pin the source plist that Tauri merges at bundle time.
+    // (include_str! also fails the build outright if Info.plist is removed.)
+
+    fn nsappsleepdisabled_is_true(plist: &str) -> bool {
+        plist
+            .split("<key>NSAppSleepDisabled</key>")
+            .nth(1)
+            .map(|after| after.trim_start().starts_with("<true/>"))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn app_nap_check_discriminates() {
+        // Guard the guard: the check must reject a flipped value or a missing key,
+        // so the real-plist assertion below can't pass vacuously.
+        assert!(nsappsleepdisabled_is_true(
+            "<dict>\n  <key>NSAppSleepDisabled</key>\n  <true/>\n</dict>"
+        ));
+        assert!(!nsappsleepdisabled_is_true(
+            "<dict>\n  <key>NSAppSleepDisabled</key>\n  <false/>\n</dict>"
+        ));
+        assert!(!nsappsleepdisabled_is_true("<dict></dict>"));
+    }
+
+    #[test]
+    fn info_plist_opts_out_of_app_nap() {
+        // The source plist Tauri merges at bundle time must declare
+        // NSAppSleepDisabled = true, or background live-reload silently regresses.
+        let plist = include_str!("../Info.plist");
+        assert!(
+            nsappsleepdisabled_is_true(plist),
+            "src-tauri/Info.plist must set <key>NSAppSleepDisabled</key><true/> \
+             (opt out of macOS App Nap for background live-reload)"
+        );
     }
 }
