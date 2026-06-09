@@ -8,12 +8,12 @@ const WEBDRIVER_PORT = 4445;
 
 // auto-refresh-cold-start.spec.js 는 Welcome 탭 race 가드를 위해 매 it
 // 마다 새 tmpdir 를 만들고 Rust 측 WatcherState 에 path 를 add_file 한다.
-// WatcherState 는 path entry 를 영속 누적하며 e2e 세션 안에서 제거되지
-// 않아, 인접 spec(특히 auto-refresh.spec.js 의 seeded 자동갱신)이 누적된
-// entry 의 debounce/last_emit 와 race 하면 silent fail 한다.
-// 본질 fix 는 Rust watcher_reset IPC 신설이지만(별도 작업) 그 전까지는
-// cold-start spec 을 가장 마지막에 두어 dirty state 가 후속 spec 에
-// 새지 않도록 한다. 다른 spec 들은 alphabetical 순서를 유지한다.
+// WatcherState 는 path entry 를 세션 안에서 누적하므로, cold-start 는 이제
+// beforeEach 에서 reset_watcher IPC(commands.rs)로 매번 watch 를 비워 각
+// 시나리오를 누적/교차오염에서 격리한다. 다만 reset 은 beforeEach(테스트
+// 시작 전)라 spec 종료 시점엔 마지막 테스트의 watch 가 남는다 → cold-start
+// 를 가장 마지막에 두어 그 잔여 state 가 후속 spec 으로 새지 않게 한다
+// (defense-in-depth). 다른 spec 들은 alphabetical 순서를 유지한다.
 const SPECS_DIR = resolve(__dirname, 'specs');
 const COLD_START_SPEC = 'auto-refresh-cold-start.spec.js';
 const allSpecs = readdirSync(SPECS_DIR)

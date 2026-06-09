@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyExternalEditUntilReflected } from '../helpers/live-reload.js';
 
 // These specs exercise auto-refresh from a *cold* (empty) session — no
 // seeded `bridge-tab-paths` sidecar — so they actually hit the
@@ -210,16 +211,19 @@ describe('자동 갱신 - cold start (Welcome + 새 파일 race 포함)', () => 
         ),
       { timeout: 8000, timeoutMsg: 'cold-start reload did not finish (bridge/editor/tabs not ready)' }
     );
-    // Drain debounce + FSEvents tail. Each test adds a new tmpdir to
-    // the watcher's snapshot (WatcherState never removes entries — same
-    // structure as restore_watcher → add_file in production), so late
-    // events from prior tests' tmpdirs can land in this window and bump
-    // `last_emit` past the 300ms debounce, causing the next external
-    // write to be silently suppressed. 400ms > DEBOUNCE_MS gives the
-    // watcher a quiet baseline before each scenario starts mutating
-    // files. Trade-off: ~5s total wall-clock for the spec; acceptable
-    // since cold-start runs only on push gates.
-    await browser.pause(400);
+    // Reset the Rust watcher to a clean slate before each scenario. WatcherState
+    // only grows within the app process (every opened file stays watched — same
+    // as restore_watcher → add_file in production), so without this, late
+    // FSEvents from PRIOR tests' tmpdirs land here, bump `last_emit` past the
+    // 300ms debounce, and silently suppress this scenario's first external
+    // write. Dropping the whole watch set (and its FSEvents stream) makes each
+    // test deterministic instead of racing a time-based quiesce. Backed by the
+    // reset_watcher IPC (commands.rs); see reset_watcher_is_registered_in_invoke_handler.
+    await browser.execute(async () => {
+      if (window.__TAURI_INTERNALS__) {
+        await window.__TAURI_INTERNALS__.invoke('reset_watcher');
+      }
+    });
   });
 
   it('빈 앱 → 첫 외부 파일 오픈 → 외부 수정 시 활성 탭 갱신된다', async () => {
@@ -422,8 +426,7 @@ describe('자동 갱신 - cold start (Welcome + 새 파일 race 포함)', () => 
     await editorEquals(original);
 
     const updated = '# 한글 메모\n\n수정 ✏️ ' + Date.now() + '\n';
-    writeFileSync(file, updated);
-    await editorEquals(updated);
+    await applyExternalEditUntilReflected(() => writeFileSync(file, updated), updated);
   });
 
   it('cold open 후 비활성 탭 외부 수정 → 활성화 시 디스크 내용으로 갱신', async () => {
@@ -511,9 +514,10 @@ describe('자동 갱신 - cold start (Welcome + 새 파일 race 포함)', () => 
 
     const updated = '# atomic ' + Date.now() + '\n';
     const tmp = file + '.tmp';
-    writeFileSync(tmp, updated);
-    renameSync(tmp, file);
-    await editorEquals(updated);
+    await applyExternalEditUntilReflected(() => {
+      writeFileSync(tmp, updated);
+      renameSync(tmp, file);
+    }, updated);
   });
 
   it('cold open → unlink + recreate → 활성 탭 갱신', async () => {

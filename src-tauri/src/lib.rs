@@ -54,6 +54,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
                 commands::native_open_file,
                 commands::restore_watcher,
+                commands::reset_watcher,
                 commands::refresh_active_tab,
                 commands::save_file,
                 commands::export_text_file,
@@ -1434,6 +1435,17 @@ mod rust_invoke_handler_tests {
             "open_release_page must be listed in generate_handler![] \
              (the update status bar's What's new link invokes this; \
              without registration the link silently no-ops)"
+        );
+    }
+
+    #[test]
+    fn reset_watcher_is_registered_in_invoke_handler() {
+        assert!(
+            handler_block().contains("reset_watcher"),
+            "reset_watcher must be listed in generate_handler![] \
+             (the cold-start e2e invokes it in beforeEach to clear accumulated \
+             watches; without registration the call silently fails and the \
+             spec goes flaky again)"
         );
     }
 }

@@ -254,9 +254,11 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
     Ok(())
 }
 
-/// Stop watching all files and clear the file list.
-#[cfg(test)]
-fn stop_watching(state: &WatcherState) {
+/// Stop the active watcher and forget every watched file, returning the
+/// WatcherState to its initial empty state. Backs the `reset_watcher` IPC
+/// command (start a fresh session / isolate e2e scenarios from accumulated
+/// watches) and is used by tests.
+pub(crate) fn stop_watching(state: &WatcherState) {
     if let Ok(mut guard) = state.handle.lock() {
         guard.take();
     }

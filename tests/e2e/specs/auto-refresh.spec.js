@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { applyExternalEditUntilReflected } from '../helpers/live-reload.js';
 
 // Auto-refresh on external file change is the app's core value. These specs
 // guard the path-based matching used by the bridge to identify which tab
@@ -327,18 +328,14 @@ describe('외부 파일 변경 자동 갱신', () => {
       { timeout: 5000, timeoutMsg: 'save_file did not write disk content' }
     );
 
-    // Watcher's own update path must still match the same canonical key.
+    // Watcher's own update path must still match the same canonical key. The
+    // save_file disk write above also fires a watcher event that records the
+    // per-path debounce timestamp, so a one-shot external write landing within
+    // DEBOUNCE_MS (300) of it would be coalesced away and the editor would never
+    // refresh. Re-apply until it lands — robust to that debounce/FSEvents
+    // timing instead of a fixed settle.
     const ext = '# external override ' + Date.now() + '\n';
-    writeFileSync(file, ext);
-
-    await browser.waitUntil(
-      async () => {
-        const v = await browser.execute(() =>
-          document.getElementById('markdown-editor')?.value || '');
-        return v.trim() === ext.trim();
-      },
-      { timeout: 5000, timeoutMsg: 'editor did not refresh after save round-trip' }
-    );
+    await applyExternalEditUntilReflected(() => writeFileSync(file, ext), ext);
   });
 
   it('한글 파일명과 본문 내용도 정확히 갱신된다', async () => {

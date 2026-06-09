@@ -286,6 +286,19 @@ pub fn restore_watcher(app: tauri::AppHandle, path: String) -> Option<String> {
     }
 }
 
+/// Tauri IPC command — stop watching all files and forget the watched set,
+/// returning the watcher to a clean state. Used to start a fresh session and to
+/// isolate e2e scenarios from watches accumulated by earlier tests: WatcherState
+/// otherwise only grows within a process (every opened file stays watched), so
+/// late FSEvents from prior tests' files would bump debounce timestamps and
+/// silently suppress a later scenario's first external write.
+#[tauri::command]
+pub fn reset_watcher(app: tauri::AppHandle) {
+    let state = app.state::<WatcherState>();
+    crate::watcher::stop_watching(&state);
+    dbg_log!("[reset] Watcher state cleared");
+}
+
 /// Look up a path string in the WatcherState files map and return the
 /// canonical PathBuf if it is currently being watched. Used as a guardrail
 /// for path-based IPC commands so the webview can't direct us at arbitrary
