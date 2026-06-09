@@ -9,8 +9,11 @@ on:
 # auto/submodule-update) whenever Markdown-Viewer ships a new Production
 # deployment. `pull_request` makes this suite run on that PR automatically, so a
 # submodule bump that breaks our DOM/contract coupling is caught here — by the
-# static + behavioral contract tests — instead of slipping through the PR's
-# manual checklist.
+# STATIC contract test (tests/unit/submodule-contract.test.mjs) — instead of
+# slipping through the PR's manual checklist. The BEHAVIORAL contracts
+# (input→render, live-reload, …) live in e2e and are NOT run here (see the NOTE
+# at the bottom); they stay a local pre-push gate, so the submodule-update PR
+# body tells the reviewer to run `npm run test:e2e` before merging.
 
 # macOS runner (matches release.yml): scripts/prepare-frontend.sh uses BSD
 # `sed -i ''` and default_app.rs links macOS Launch Services, so the unit suite

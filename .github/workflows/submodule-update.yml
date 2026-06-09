@@ -71,16 +71,23 @@ jobs:
 
             Deployed commit: `${{ steps.check.outputs.deployed_sha }}`
 
-            Automated (the `Tests` workflow runs on this PR):
-            unit tests (Rust + JS) and the submodule contract tests
-            (`tests/unit/submodule-contract.test.mjs`,
-            `tests/e2e/specs/submodule-contract.spec.js`) fail if this bump
+            **Automated on this PR (the `Tests` workflow):** unit tests only —
+            Rust (`cargo test --lib`) + JS (`node --test tests/unit/*.mjs`),
+            including the STATIC submodule contract
+            (`tests/unit/submodule-contract.test.mjs`). These fail if this bump
             renamed/removed an element id, localStorage key, tab class/attr, or
-            the input→render behavior our overrides depend on. Check the PR's
-            CI status before merging.
+            a worker sibling asset our overrides depend on. Check CI before merge.
 
-            Manual verification (CI can't cover these):
+            **NOT run in CI — local pre-push gate (`npm run test:e2e`):** the
+            BEHAVIORAL contracts (input→render, live-reload, Reset, large-doc
+            worker) live in `tests/e2e/specs/` (incl. `submodule-contract.spec.js`).
+            They need a headed WKWebView and are intentionally excluded from CI
+            (see `.github/workflows/test.yml`), so a behavioral regression will
+            NOT turn this PR red — run the e2e suite locally before merging.
+
+            Manual verification (neither CI nor e2e covers these):
             - [ ] App builds successfully
+            - [ ] `npm run test:e2e` passes locally (behavioral contracts)
             - [ ] Live reload works (edit in a terminal beside the app, no tab switch)
             - [ ] Theme persistence works
             - [ ] No visual regressions

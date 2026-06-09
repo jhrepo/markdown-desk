@@ -142,6 +142,12 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - 동작 계약   : editor `input` → 서브모듈 `debouncedRender` → `#markdown-preview`
                재렌더 (라이브리로드의 핵심). `renderMarkdown` 은 서브모듈
                `DOMContentLoaded` 클로저 내부라 직접 호출 불가.
+- 갱신 우선순위: 라이브리로드 sink(watcher 외부 파일 변경 / focus·visibilitychange
+               복귀 / 탭 전환)는 editor.value 를 디스크 내용으로 **무조건** 교체한다.
+               미저장 편집을 보호하는 dirty-guard 는 두지 않는다 — 실시간 갱신과
+               외부 편집이 미저장 in-app 편집보다 항상 우선한다(저장 책임은
+               사용자에게: `Cmd+S`). 중복 탭(같은 파일) 일관성도 이 무조건
+               반영에 의존한다.
 - 빌드 자산   : script.js 가 `new Worker` / `new URL("x.js")` / `importScripts` 로
                로드하는 형제 `.js` 는 `prepare-frontend.sh` 복사 목록에 반드시
                포함돼야 한다. 예) `preview-worker.js`(3.7.x 프리뷰 렌더 워커,
