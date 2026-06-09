@@ -58,6 +58,11 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - [ ] Export > HTML → 동일 확인
 - [ ] Export > PDF → 동일 확인
 
+> Export 가로채기(saveAs / jsPDF.prototype.save 오버라이드)는 **의도적으로 e2e 를
+> 두지 않고 수동 QA 로만 검증한다.** 메커니즘이 단순·견고하고(네이티브 저장
+> 다이얼로그로 위임), 헤드리스에서 실제 파일 다이얼로그·PDF 생성을 검증하기엔
+> 비용 대비 가치가 낮다. 추가 제안하지 말 것 — 필요해지면 그때 다시 논의한다.
+
 ### Mermaid 다이어그램
 - [ ] Mermaid 코드 블록이 다이어그램으로 렌더링 ✅
 - [ ] 펼쳐보기(Zoom) 버튼 클릭 → 모달에서 다이어그램 정상 표시 ✅
@@ -126,8 +131,9 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 
 ## Submodule Coupling (서브모듈 결합 지점)
 
-우리 오버라이드(bridge.js / toc.js / commands.rs)는 서브모듈 DOM에 4종으로
-결합한다. 서브모듈 업데이트가 이 중 하나라도 바꾸면 조용한 no-op으로 깨진다.
+우리 오버라이드(bridge.js / toc.js / commands.rs)는 서브모듈에 6종으로
+결합한다(DOM 4종 + 빌드 1종 + 생명주기 1종). 서브모듈 업데이트가 이 중
+하나라도 바꾸면 대개 조용한 no-op으로 깨진다.
 
 - Element id  : `#markdown-editor`(라이브리로드 sink), `#markdown-preview`(렌더/TOC),
                `#file-input`(열기), `#tab-list`, `#mobile-tab-list`, mermaid/reset 계열
@@ -136,24 +142,45 @@ git push origin main --tags    # push → GitHub Actions 자동 빌드/릴리스
 - 동작 계약   : editor `input` → 서브모듈 `debouncedRender` → `#markdown-preview`
                재렌더 (라이브리로드의 핵심). `renderMarkdown` 은 서브모듈
                `DOMContentLoaded` 클로저 내부라 직접 호출 불가.
+- 빌드 자산   : script.js 가 `new Worker` / `new URL("x.js")` / `importScripts` 로
+               로드하는 형제 `.js` 는 `prepare-frontend.sh` 복사 목록에 반드시
+               포함돼야 한다. 예) `preview-worker.js`(3.7.x 프리뷰 렌더 워커,
+               50KB+ 문서). 누락 시 WebView 에서 404 → 렌더가 메인스레드로
+               조용히 폴백(콘솔 에러 + 첫 렌더 지연). `sw.js`/`manifest.json`
+               같은 PWA 자산은 Tauri 셸에서 무의미/가드되므로 의도적으로 제외.
+- 생명주기 동작: 서브모듈은 `beforeunload` / `visibilitychange(hidden)` 에서
+               in-memory 탭을 `markdownViewerTabs` 로 flush 한다(3.7.x PERF-008).
+               → bridge.js `hardReload`(Reset)는 reload 직전 tab-session 키 쓰기를
+               억제해야 방금 지운 세션이 flush 로 되살아나지 않는다. e2e 의
+               seed→reload / cold-start 도 같은 이유로 reload 직전 tab-session 키
+               쓰기를 동결한다(없으면 stale 탭이 전제를 무너뜨려 silent fail).
 
 **결합 지점의 single source of truth 는 이 문서가 아니라 계약 테스트다:**
-- `tests/unit/submodule-contract.test.mjs`   (정적: id/키/토큰 + commands.rs 교차언어)
+- `tests/unit/submodule-contract.test.mjs`   (정적: id/키/토큰 + commands.rs 교차언어
+  + 워커 형제 `.js` 가 prepare-frontend 복사 목록에 있는지)
 - `tests/e2e/specs/submodule-contract.spec.js` (동작: input→렌더 등)
+- `tests/e2e/specs/reset.spec.js`             (Reset 이 탭 세션을 실제로 초기화 —
+  beforeunload flush 가 되살리지 않는지)
+- `tests/e2e/specs/large-doc-render.spec.js`  (50KB+ 라이브리로드 + 워커 세그먼트 실동작)
 
-새 세션에서 결합 지점을 파악하려면 위 두 파일을 먼저 읽는다. (위 목록은 방향타일 뿐 —
-정확한 현재 목록은 테스트가 검증한다.)
+새 세션에서 결합 지점을 파악하려면 위 계약 테스트들을 먼저 읽는다. (위 목록은
+방향타일 뿐 — 정확한 현재 목록은 테스트가 검증한다.)
 
 **재추출 레시피:**
 
 ```bash
 grep -rhoE "getElementById\('[^']+'\)" scripts/bridge.js scripts/toc.js src-tauri/src/commands.rs | sort -u
 grep -rhoE "querySelector(All)?\('#[^']+'\)" scripts src-tauri/src/commands.rs | sort -u
+# 서브모듈이 런타임에 로드하는 형제 자산(워커/스크립트) — prepare-frontend 복사 대상인지 대조
+grep -rnoE "new (Worker|URL)\((['\"][^'\"]+\.js)|importScripts\(['\"][^'\"]+\.js" Markdown-Viewer/script.js
 ```
 
 **서브모듈 bump 절차:** 먼저 `node --test tests/unit/submodule-contract.test.mjs`
-→ 실패하면 소비자(bridge/toc/commands)와 테스트 기대치를 같은 커밋에서 함께
-갱신한다. 테스트만 느슨하게 풀지 말 것.
+→ 실패하면 소비자(bridge/toc/commands/prepare-frontend)와 테스트 기대치를 같은
+커밋에서 함께 갱신한다. 테스트만 느슨하게 풀지 말 것. 정적 계약이 통과해도
+**런타임 동작 회귀**(예: 3.7.x 의 beforeunload 탭 flush 가 Reset·e2e seed 를
+깨뜨린 사례)는 못 잡으니, bump 시 라이브리로드/Reset/대용량 관련 e2e 도 함께
+돌린다.
 
 ## Key Rules
 
