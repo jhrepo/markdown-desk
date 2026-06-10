@@ -915,9 +915,14 @@
       findCount.textContent = (currentIdx + 1) + '/' + matches.length;
     }
 
-    // Cmd+F → open find bar
+    // Cmd+F → open find bar. e.key is lowercased because Caps Lock reports
+    // 'F' with shiftKey false (the Cmd+T/W bug family); !e.shiftKey keeps
+    // Cmd+Shift+F unbound. (Deliberate corner change vs the old exact
+    // match: with Caps Lock AND Shift held, e.key cancels out to lowercase
+    // and the old code matched — now every Shift combo is uniformly
+    // excluded, same as without Caps Lock.)
     document.addEventListener('keydown', function(e) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         e.stopPropagation();
         openFindBar();
@@ -942,9 +947,13 @@
 
   // --- Keyboard shortcuts ---
 
-  // Cmd+S → save to original file
+  // Cmd+S → save to original file. Lowercased for Caps Lock (an exact 's'
+  // match made save a SILENT no-op with Caps Lock on); !e.shiftKey keeps
+  // Cmd+Shift+S unbound. (Corner change: Caps Lock+Shift+S — lowercase
+  // e.key, shiftKey true — used to slip through the exact match and save;
+  // now every Shift combo is uniformly excluded.)
   document.addEventListener('keydown', function(e) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
       e.preventDefault();
       e.stopPropagation();
       if (window.__TAURI_INTERNALS__) {
@@ -961,9 +970,11 @@
     }
   }, true);
 
-  // Cmd+O → native file dialog
+  // Cmd+O → native file dialog. Lowercased for Caps Lock; !e.shiftKey keeps
+  // Cmd+Shift+O unbound (incl. the Caps Lock+Shift corner the old exact
+  // match let through).
   document.addEventListener('keydown', function(e) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'o') {
       e.preventDefault();
       e.stopPropagation();
       if (window.__TAURI_INTERNALS__) {
@@ -972,9 +983,12 @@
     }
   }, true);
 
-  // Cmd+R / Cmd+Shift+R → hard reload
+  // Cmd+R / Cmd+Shift+R → hard reload. Shift is deliberately NOT excluded:
+  // Cmd+Shift+R is the conventional hard-reload alias (with the old exact
+  // 'r' match Shift produced 'R' and the alias never actually worked), and
+  // the same lowercasing fixes Caps Lock.
   document.addEventListener('keydown', function(e) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'r') {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'r') {
       e.preventDefault();
       e.stopPropagation();
       hardReload();

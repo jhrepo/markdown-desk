@@ -221,5 +221,29 @@ describe('키보드 단축키', () => {
       timeoutMsg:
         'Cmd+S did not persist the editor content to the original file (save_file chain broken)',
     });
+
+    // Caps Lock shape (key 'S', shiftKey false): the worst member of the
+    // exact-match bug family — save silently no-ops while the user believes
+    // the file was written. Reuses the seeded tab from above.
+    const capsMarker = 'SAVED_BY_CAPS_CMD_S_' + Date.now();
+    await browser.execute((text) => {
+      const ed = document.getElementById('markdown-editor');
+      ed.value = '# ' + text + '\n';
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'S',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }, capsMarker);
+
+    await browser.waitUntil(() => readFileSync(file, 'utf8').includes(capsMarker), {
+      timeout: 5000,
+      timeoutMsg:
+        'Cmd+S with Caps Lock (key "S") did not save — exact-match key check regressed',
+    });
   });
 });

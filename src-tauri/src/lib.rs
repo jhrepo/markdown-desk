@@ -462,19 +462,41 @@ mod bridge_script_tests {
         );
     }
 
-    // Keyboard shortcut contracts — verified via grep because synthetic
-    // KeyboardEvent dispatch does not reach bridge.js's capture listener in
-    // the WebKit/Tauri runtime, so e2e coverage is infeasible for Cmd+S and
-    // Cmd+O. (Cmd+R is covered end-to-end via its localStorage side effect.)
-    // Each shortcut must: match its key, preventDefault, and invoke the
-    // registered Tauri command with the expected argument shape.
+    // Keyboard shortcut contracts. Cmd+R, Cmd+T/W and Cmd+S are ALSO covered
+    // end-to-end via observable side effects (tests/e2e/specs/
+    // keyboard-shortcuts.spec.js); Cmd+O and Cmd+F stay grep-only — Cmd+O's
+    // side effect is a native open dialog webdriver cannot observe or
+    // dismiss, and Cmd+F's find bar lives entirely in bridge-injected DOM.
+    // Each handler must match its key CAPS-LOCK-TOLERANTLY (Caps Lock
+    // reports an uppercase e.key with shiftKey false, so an exact
+    // lowercase-literal match silently kills the shortcut — the bug family
+    // fixed for Cmd+T/W), preventDefault, and invoke the registered Tauri
+    // command with the expected argument shape.
+
+    #[test]
+    fn cmd_f_opens_find_bar_caps_lock_tolerant() {
+        let s = bridge_js();
+        // `!e.shiftKey` keeps every Shift combo unbound — incl. the Caps
+        // Lock+Shift corner (lowercase e.key, shiftKey true) the old exact
+        // match let through.
+        assert!(
+            s.contains("!e.shiftKey && e.key.toLowerCase() === 'f'"),
+            "Cmd+F key check must lowercase e.key (Caps Lock) and exclude Shift"
+        );
+        assert!(s.contains("openFindBar()"), "Cmd+F must open the find bar");
+    }
 
     #[test]
     fn cmd_s_invokes_save_file_with_path_and_content() {
         let s = bridge_js();
-        // The handler opens with this exact `e.key === 's'` check; if
-        // someone changes the key literal, this pins the regression.
-        assert!(s.contains("e.key === 's'"), "Cmd+S key check missing");
+        // Worst case of the Caps Lock family: an exact === 's' match makes
+        // Cmd+S a silent no-op with Caps Lock on — the user believes the
+        // file was saved. `!e.shiftKey` keeps every Shift combo unbound,
+        // incl. the Caps Lock+Shift corner the old exact match let through.
+        assert!(
+            s.contains("!e.shiftKey && e.key.toLowerCase() === 's'"),
+            "Cmd+S key check must lowercase e.key (Caps Lock) and exclude Shift"
+        );
         assert!(
             s.contains("invoke('save_file'"),
             "Cmd+S handler must invoke 'save_file'"
@@ -488,7 +510,10 @@ mod bridge_script_tests {
     #[test]
     fn cmd_o_invokes_native_open_file() {
         let s = bridge_js();
-        assert!(s.contains("e.key === 'o'"), "Cmd+O key check missing");
+        assert!(
+            s.contains("!e.shiftKey && e.key.toLowerCase() === 'o'"),
+            "Cmd+O key check must lowercase e.key (Caps Lock) and exclude Shift"
+        );
         assert!(
             s.contains("invoke('native_open_file')"),
             "Cmd+O handler must invoke 'native_open_file'"
@@ -498,7 +523,21 @@ mod bridge_script_tests {
     #[test]
     fn cmd_r_triggers_hard_reload() {
         let s = bridge_js();
-        assert!(s.contains("e.key === 'r'"), "Cmd+R key check missing");
+        // Shift is NOT excluded here: Cmd+Shift+R is the conventional
+        // hard-reload alias the handler comment promises (with the old exact
+        // === 'r' match Shift produced 'R' and the alias never worked), and
+        // the same lowercasing fixes Caps Lock.
+        assert!(
+            s.contains("e.key.toLowerCase() === 'r'"),
+            "Cmd+R key check must lowercase e.key (Caps Lock + Cmd+Shift+R)"
+        );
+        // Negative pin for the alias: the positive substring above would
+        // still match if someone re-added a Shift exclusion, silently
+        // killing Cmd+Shift+R again.
+        assert!(
+            !s.contains("!e.shiftKey && e.key.toLowerCase() === 'r'"),
+            "Cmd+R must NOT exclude Shift — Cmd+Shift+R is a supported hard-reload alias"
+        );
         // hardReload() preserves globalState + dismissed keys then reloads.
         assert!(s.contains("hardReload()"), "Cmd+R must call hardReload");
     }
