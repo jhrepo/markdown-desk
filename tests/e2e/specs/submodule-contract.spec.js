@@ -16,6 +16,8 @@
 // These tests touch no files and start no watcher, so they're order-independent
 // and don't pollute the shared WatcherState (unlike the auto-refresh specs).
 
+import { installTabSessionWriteFreeze } from '../helpers/session.js';
+
 const REQUIRED_ELEMENTS = [
   { id: 'markdown-editor', tag: 'TEXTAREA', why: 'live-reload sink (js_update_tab sets .value)' },
   { id: 'markdown-preview', why: 'preview render target (bridge.js + toc.js)' },
@@ -36,8 +38,13 @@ describe('서브모듈 동작 계약 (live-reload 메커니즘 + DOM)', () => {
     await browser.execute(() => {
       try { localStorage.clear(); } catch {}
       try { delete window.__bridgeTabPaths; } catch {}
-      window.location.reload();
     });
+    // Without the freeze, the submodule's beforeunload tab-flush (PERF-008)
+    // writes the PREVIOUS spec's tabs back over the clear — making this
+    // suite order-DEPENDENT despite the header's claim. The current
+    // assertions tolerate extra tabs, but the precondition should hold.
+    await browser.execute(installTabSessionWriteFreeze);
+    await browser.execute(() => window.location.reload());
     await browser.waitUntil(
       async () =>
         browser.execute(() =>

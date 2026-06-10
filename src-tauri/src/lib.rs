@@ -504,6 +504,35 @@ mod bridge_script_tests {
     }
 
     #[test]
+    fn foreground_resync_coalesces_visibility_and_focus() {
+        // Un-minimizing the window fires `visibilitychange` (hidden→visible)
+        // AND `window` focus back-to-back. Both re-sync paths used to call
+        // refreshActiveFromDisk directly, doubling the disk read + eval on
+        // every restore (harmless thanks to js_update_tab's unchanged no-op,
+        // but pure I/O waste in the known read-amplification family). Both
+        // listeners must route through the queued wrapper, which collapses
+        // same-tick duplicates behind a flag.
+        let s = bridge_js();
+        let body = slice_fn_body(&s, "queueRefreshActiveFromDisk");
+        assert!(
+            body.contains("refreshQueued"),
+            "queueRefreshActiveFromDisk must gate on the refreshQueued flag"
+        );
+        assert!(
+            body.contains("refreshActiveFromDisk()"),
+            "queued wrapper must invoke the real refresh"
+        );
+        assert!(
+            s.contains("window.addEventListener('focus', queueRefreshActiveFromDisk)"),
+            "focus listener must use the coalescing wrapper"
+        );
+        assert!(
+            !s.contains("window.addEventListener('focus', refreshActiveFromDisk)"),
+            "focus listener bypasses the coalescing wrapper (double-read regression)"
+        );
+    }
+
+    #[test]
     fn cmd_t_and_w_forward_to_submodule_web_bindings() {
         // Markdown-Viewer 3.7.3 gates its Ctrl/Cmd+T (new tab) and Ctrl/Cmd+W
         // (close tab) bindings behind `typeof Neutralino !== 'undefined'` —
@@ -517,8 +546,22 @@ mod bridge_script_tests {
         // The matching upstream pin lives in
         // tests/unit/submodule-contract.test.mjs (gate + web bindings exist).
         let s = bridge_js();
-        assert!(s.contains("e.key === 't'"), "Cmd+T key check missing");
-        assert!(s.contains("e.key === 'w'"), "Cmd+W key check missing");
+        // Caps Lock yields e.key 'T'/'W' (uppercase, shiftKey false), so the
+        // shim must compare the LOWERCASED key — an exact === 't' match left
+        // the shortcuts dead under Caps Lock. Shift/Alt chords must stay
+        // excluded: Cmd+Shift+T is NOT new-tab (browser convention reserves
+        // it for reopen-closed-tab), and the synthetic re-dispatch itself
+        // carries Alt+Shift, so the exclusion also makes recursion impossible.
+        assert!(
+            s.contains("e.key.toLowerCase()"),
+            "Cmd+T/W shim must lowercase e.key (Caps Lock regression)"
+        );
+        assert!(
+            s.contains("e.shiftKey || e.altKey"),
+            "Cmd+T/W shim must exclude Shift/Alt chords"
+        );
+        assert!(s.contains("key === 't'"), "Cmd+T key check missing");
+        assert!(s.contains("key === 'w'"), "Cmd+W key check missing");
         let body = slice_fn_body(&s, "bridgeForwardDesktopShortcut");
         assert!(
             body.contains("new KeyboardEvent('keydown'"),
@@ -544,6 +587,15 @@ mod bridge_script_tests {
         assert!(
             body.contains("invoke('reset_watcher')"),
             "hardReload must invoke 'reset_watcher' to clear Rust WatcherState"
+        );
+        // then(reload, reload) covers resolve AND reject, but a promise that
+        // never settles would strand the page mid-Reset with the tab-session
+        // setItem suppression still installed. No real trigger is known
+        // (Tauri rejects even unregistered commands), so this is a cheap
+        // defensive fallback: reload regardless after a timeout.
+        assert!(
+            body.contains("setTimeout(") && body.contains("clearTimeout("),
+            "hardReload must reload via timeout fallback if reset_watcher never settles"
         );
     }
 

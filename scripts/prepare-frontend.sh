@@ -3,8 +3,21 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-FRONTEND_DIR="$PROJECT_DIR/dist"
+# Output directory override for tests: the unit contract suite
+# (tests/unit/submodule-contract.test.mjs) runs this script against a
+# throwaway directory so it never overwrites the repo's dist/ — a default
+# run from a test would rebuild dist/ in RELEASE mode (dev-hooks stripped)
+# and a later raw `cargo build` would embed that hookless frontend.
+# Builds (tauri.conf.json before*Command) don't set this and use dist/.
+FRONTEND_DIR="${MD_DESK_FRONTEND_DIR:-$PROJECT_DIR/dist}"
 SUBMODULE_DIR="$PROJECT_DIR/Markdown-Viewer"
+
+# The directory is caller-supplied and about to be rm -rf'd: refuse anything
+# but an absolute path so a relative/empty override can't delete CWD contents.
+case "$FRONTEND_DIR" in
+  /*) ;;
+  *) echo "error: frontend dir must be an absolute path, got '$FRONTEND_DIR'" >&2; exit 1 ;;
+esac
 
 # Clean and recreate frontend directory
 rm -rf "$FRONTEND_DIR"

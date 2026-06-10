@@ -9,7 +9,18 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+// POLICY — one-shot writes are intentional, do NOT blanket-convert them to
+// applyExternalEditUntilReflected. The helper re-applies the edit every
+// ~1.5s, which is longer than the watcher's DEBOUNCE_MS (300), so a spec
+// using it would still PASS if the debounce-after-read fix regressed (the
+// retry simply rides over the swallowed first event). The plain
+// writeFileSync + waitUntil specs below are the end-to-end net for exactly
+// that regression class (unit-side pin:
+// process_candidates_failed_read_does_not_consume_debounce). Reach for the
+// helper only where its header's two documented timing windows genuinely
+// apply (fresh watcher startup / write-after-save coalescing).
 import { applyExternalEditUntilReflected } from '../helpers/live-reload.js';
+import { installTabSessionWriteFreeze } from '../helpers/session.js';
 
 // Auto-refresh on external file change is the app's core value. These specs
 // guard the path-based matching used by the bridge to identify which tab
@@ -43,18 +54,10 @@ describe('외부 파일 변경 자동 갱신', () => {
       const m = {};
       list.forEach((t, i) => { m[t.id] = paths[i]; });
       localStorage.setItem('bridge-tab-paths', JSON.stringify(m));
-      // Markdown-Viewer 3.7.x (PERF-008) flushes the in-memory `tabs` array to
-      // markdownViewerTabs on `beforeunload`. The reload below would otherwise
-      // fire that flush and clobber the seed we just wrote with the previous
-      // page's stale tabs. Freeze writes to the tab-session keys until reload
-      // swaps the JS context (which discards this patch). Other keys still
-      // persist normally.
-      const origSet = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (k, v) {
-        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
-        return origSet.call(this, k, v);
-      };
     }, seedTabs, watchedPaths);
+    // Keep the seed from being clobbered by the submodule's beforeunload
+    // flush on the reload below (see helpers/session.js for the mechanism).
+    await browser.execute(installTabSessionWriteFreeze);
     await browser.execute(() => window.location.reload());
     await browser.pause(2500);
   }
@@ -497,14 +500,8 @@ describe('외부 파일 변경 자동 갱신', () => {
         [id]: paths[0],
         'tab_stale_long_gone': '/tmp/already/closed.md',
       }));
-      // Freeze tab-session writes so the new submodule's beforeunload flush
-      // (PERF-008) doesn't clobber this seed on the reload below.
-      const origSet = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (k, v) {
-        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
-        return origSet.call(this, k, v);
-      };
     }, [{ title: 'live.md', content: '# live\n' }], [file]);
+    await browser.execute(installTabSessionWriteFreeze);
     await browser.execute(() => window.location.reload());
     await browser.pause(2500);
 

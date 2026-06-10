@@ -19,22 +19,35 @@ on:
 # `sed -i ''` and default_app.rs links macOS Launch Services, so the unit suite
 # is exercised on the same platform we ship.
 
+# Least privilege: this workflow only checks out and runs tests — no
+# release uploads, no PR comments. GITHUB_TOKEN stays read-only even if a
+# compromised dependency/action tries to use it. (Matches the explicit
+# permissions convention submodule-update.yml already follows.)
+permissions:
+  contents: read
+
 jobs:
   unit:
     name: Unit tests + coverage
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive   # contract tests read Markdown-Viewer/ source
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
 
-      - uses: dtolnay/rust-toolchain@stable
+      # This action selects the toolchain from its REF NAME (@stable); with a
+      # SHA pin that signal is gone. This particular SHA (stable-branch HEAD)
+      # happens to default to stable anyway, but the explicit input keeps the
+      # selection correct no matter which SHA the pin moves to.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
 
@@ -50,7 +63,7 @@ jobs:
         run: cargo test --lib --manifest-path src-tauri/Cargo.toml
 
       - name: Install tarpaulin
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2
         with:
           tool: cargo-tarpaulin
 

@@ -206,17 +206,17 @@ fn rebuild_watcher(app: &tauri::AppHandle, state: &WatcherState) -> Result<(), S
                     // Gate each candidate on its own debounce window; the debounce
                     // timestamp is recorded only after a successful read, so a
                     // rename-away/delete whose read fails doesn't suppress a
-                    // follow-up recreate. On lock poison, err toward emitting: a
-                    // throwaway map + zero debounce so every candidate is tried.
-                    let emits = match last_emit.lock() {
-                        Ok(mut map) => {
-                            process_candidates(&candidates, &mut map, now, DEBOUNCE_MS, read)
-                        }
-                        Err(_) => {
-                            let mut scratch = HashMap::new();
-                            process_candidates(&candidates, &mut scratch, now, 0, read)
-                        }
-                    };
+                    // follow-up recreate. Mutex poison is permanent, so a
+                    // scratch-map fallback here would disable debouncing for the
+                    // rest of the session; into_inner recovers the real map
+                    // instead (the data is a plain timestamp map — there is no
+                    // invariant a mid-update panic could have torn).
+                    let mut map = last_emit
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let emits =
+                        process_candidates(&candidates, &mut map, now, DEBOUNCE_MS, read);
+                    drop(map);
 
                     for (key, content) in emits {
                         // Match key is the canonical path string — bridge.js

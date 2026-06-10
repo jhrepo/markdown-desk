@@ -1,14 +1,22 @@
+import { mkdtempSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { installTabSessionWriteFreeze } from '../helpers/session.js';
+
 describe('키보드 단축키', () => {
-  // Cmd+S / Cmd+O coverage lives in Rust-side grep tests
-  // (bridge_script_tests) because synthetic `dispatchEvent` doesn't reach
-  // bridge.js's keydown listener in the Tauri WebKit runtime — the earlier
-  // attempt to spy on `window.__TAURI_INTERNALS__.invoke` failed because
-  // that object is defined with non-writable descriptors, and the fallback
-  // `document.dispatchEvent(new KeyboardEvent(...))` never reaches the
-  // marker listener either (sawKey stays null). The Cmd+R side-effect test
-  // below works because hardReload() runs `window.location.reload()`, which
-  // is observable via post-reload localStorage state regardless of how
-  // precisely the event propagated.
+  // Synthetic `document.dispatchEvent(new KeyboardEvent('keydown', …))` DOES
+  // reach bridge.js's document-level capture listeners in the Tauri WebKit
+  // runtime — the Cmd+R, Cmd+T/W and Cmd+S tests below all prove it. (An
+  // earlier header here claimed the opposite; the actual historical failure
+  // was the OBSERVATION side, not the dispatch: spying on
+  // `window.__TAURI_INTERNALS__.invoke` is impossible because that object is
+  // defined with non-writable descriptors, and a marker listener added from
+  // the test never fired because bridge handlers stopPropagation() in the
+  // capture phase before it.) So shortcut e2e here observes SIDE EFFECTS
+  // instead of the event itself: post-reload localStorage state (Cmd+R),
+  // tab count (Cmd+T/W), and on-disk file content (Cmd+S). Cmd+O remains
+  // Rust-grep-only — its side effect is a native open dialog, which
+  // webdriver cannot observe or dismiss.
 
   it('Cmd+R 는 hardReload 를 수행해 ephemeral 키는 지우고 global state 는 유지한다', async () => {
     // This test reloads the page mid-spec. Snapshot the real globalState,
@@ -101,6 +109,117 @@ describe('키보드 단축키', () => {
       timeout: 5000,
       timeoutMsg:
         'Cmd+W did not close the active tab — the bridge.js Neutralino-gate shim is broken',
+    });
+  });
+
+  it('Caps Lock 상태(대문자 e.key)에서도 Cmd+T/W 가 동작한다', async () => {
+    // With Caps Lock on, keydown reports e.key 'T'/'W' with shiftKey FALSE.
+    // The shim's original exact === 't' match silently ignored that, so the
+    // shortcuts died only-with-Caps-Lock — the nastiest kind of bug report.
+    // Pin the lowercase normalization with uppercase-key synthetic events.
+    const tabCount = () =>
+      browser.execute(
+        () => document.querySelectorAll('#tab-list .tab-item').length
+      );
+    const before = await tabCount();
+
+    await browser.execute(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'T',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    });
+    await browser.waitUntil(async () => (await tabCount()) === before + 1, {
+      timeout: 5000,
+      timeoutMsg: 'Cmd+T with Caps Lock (key "T") did not open a new tab',
+    });
+
+    await browser.execute(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'W',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    });
+    await browser.waitUntil(async () => (await tabCount()) === before, {
+      timeout: 5000,
+      timeoutMsg: 'Cmd+W with Caps Lock (key "W") did not close the tab',
+    });
+  });
+
+  it('Cmd+S 는 활성 탭의 편집 내용을 원본 파일에 저장한다', async () => {
+    // Promoted from Rust-grep-only coverage: the side effect (file content
+    // on disk) is observable from Node, so the full chain — capture listener
+    // → data-path lookup → save_file IPC → fs write — is provable end-to-end.
+    // Seeds a real file-bound tab the same way the auto-refresh specs do.
+    // NOTE: this seeds+reloads the session, so it must stay the LAST test in
+    // this file.
+    const dir = mkdtempSync(join(tmpdir(), 'md-desk-cmds-'));
+    const raw = join(dir, 'save-target.md');
+    writeFileSync(raw, '# before save\n');
+    // realpath is load-bearing: macOS tmpdir lives behind a /var → /private/var
+    // symlink, and save_file resolves its target by EXACT string match against
+    // the watched-set keys, which restore_watcher stores canonicalized. A
+    // non-canonical seed silently fails the lookup ("Path not in watched set")
+    // and Cmd+S becomes a no-op. Same convention as every other seeding spec.
+    const file = realpathSync(raw);
+
+    await browser.execute((path) => {
+      const tab = {
+        id: 'tab_cmds_' + Math.random().toString(36).slice(2, 8),
+        title: 'save-target.md',
+        content: '# before save\n',
+        scrollPos: 0,
+        viewMode: 'split',
+        createdAt: Date.now(),
+      };
+      localStorage.setItem('markdownViewerTabs', JSON.stringify([tab]));
+      localStorage.setItem('markdownViewerActiveTab', tab.id);
+      localStorage.setItem('markdown-desk-watched-paths', JSON.stringify([path]));
+      const m = {};
+      m[tab.id] = path;
+      localStorage.setItem('bridge-tab-paths', JSON.stringify(m));
+    }, file);
+    await browser.execute(installTabSessionWriteFreeze);
+    await browser.execute(() => window.location.reload());
+
+    // Proceed only once the bridge has stamped data-path on the active tab —
+    // that attribute is exactly what the Cmd+S handler reads as save target.
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          const el = document.querySelector('#tab-list .tab-item.active');
+          return !!(el && el.getAttribute('data-path'));
+        }),
+      { timeout: 8000, timeoutMsg: 'active tab never got data-path after seed+reload' }
+    );
+
+    const marker = 'SAVED_BY_CMD_S_' + Date.now();
+    await browser.execute((text) => {
+      const ed = document.getElementById('markdown-editor');
+      ed.value = '# ' + text + '\n';
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 's',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }, marker);
+
+    await browser.waitUntil(() => readFileSync(file, 'utf8').includes(marker), {
+      timeout: 5000,
+      timeoutMsg:
+        'Cmd+S did not persist the editor content to the original file (save_file chain broken)',
     });
   });
 });

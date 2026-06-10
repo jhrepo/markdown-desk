@@ -25,8 +25,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -361,8 +362,20 @@ test('prepare-frontend.sh bundles every worker .js the submodule loads at runtim
 let distIndexCache = null;
 function distIndexHtml() {
   if (distIndexCache === null) {
-    execFileSync('bash', [PREPARE_FRONTEND], { cwd: REPO_ROOT, stdio: 'pipe' });
-    distIndexCache = readFileSync(resolve(REPO_ROOT, 'dist', 'index.html'), 'utf8');
+    // Run the real script into a throwaway directory, NOT the repo's dist/.
+    // A default run here would rebuild dist/ in RELEASE mode (TAURI_ENV_DEBUG
+    // unset → dev-hooks stripped); a later raw `cargo build` would then embed
+    // that hookless frontend and the dev-hook-dependent e2e specs
+    // (webview-zoom, update-banner) would silently self-skip while the gate
+    // stays green. The override also keeps this test parallel-safe against
+    // a concurrent `tauri build`'s own prepare-frontend run.
+    const outDir = mkdtempSync(join(tmpdir(), 'md-desk-dist-'));
+    execFileSync('bash', [PREPARE_FRONTEND], {
+      cwd: REPO_ROOT,
+      stdio: 'pipe',
+      env: { ...process.env, MD_DESK_FRONTEND_DIR: outDir },
+    });
+    distIndexCache = readFileSync(resolve(outDir, 'index.html'), 'utf8');
   }
   return distIndexCache;
 }
@@ -432,4 +445,68 @@ test('script.js still gates Cmd+T/W behind Neutralino and keeps the Alt+Shift we
         `the shortcut is silently dead again. Update the shim and this pin.`
     );
   }
+});
+
+// ---------------- sanitization contract (script.js render paths) ----------------
+// The WebView CSP allows 'unsafe-inline'/'unsafe-eval' for the submodule's own
+// machinery, so DOMPurify in the preview render path is the ONLY XSS defense
+// between untrusted markdown and the DOM. 3.7.x split rendering across a Web
+// Worker (preview-worker.js, which does NOT sanitize) and the main thread —
+// the worker's HTML is only safe because the main thread re-sanitizes every
+// block before insertion. A submodule bump that drops or bypasses that
+// re-sanitization would be invisible to every other test here (DOM anchors
+// unchanged, rendering still works) while silently removing the defense line.
+
+test('script.js sanitizes BOTH render paths through DOMPurify before DOM insertion', () => {
+  const js = readSubmoduleFile(SCRIPT_JS, 'script.js');
+  // The sanitizer itself: DOMPurify-backed and hard-failing when absent
+  // (a silent fallback to raw HTML would be the worst possible behavior).
+  const decl = js.match(/function sanitizePreviewHtml\s*\(/);
+  assert.ok(
+    decl,
+    'Submodule dropped/renamed sanitizePreviewHtml — re-audit the render ' +
+      'paths for a new sanitization entry point before accepting the bump.'
+  );
+  // Scope the next two assertions to THIS function's body: script.js throws
+  // the same "DOMPurify is not defined" message from another function too,
+  // so a whole-file match could be satisfied by code that isn't the
+  // sanitizer at all.
+  const bodyStart = js.indexOf('{', decl.index);
+  let depth = 0;
+  let bodyEnd = bodyStart;
+  for (let i = bodyStart; i < js.length; i += 1) {
+    if (js[i] === '{') depth += 1;
+    else if (js[i] === '}' && (depth -= 1) === 0) {
+      bodyEnd = i;
+      break;
+    }
+  }
+  const body = js.slice(bodyStart, bodyEnd + 1);
+  assert.ok(
+    body.includes('DOMPurify.sanitize(html, PREVIEW_SANITIZE_OPTIONS)'),
+    'sanitizePreviewHtml no longer routes through DOMPurify with the preview ' +
+      'options — the only XSS defense line moved or weakened.'
+  );
+  assert.ok(
+    body.includes('DOMPurify is not defined'),
+    'sanitizePreviewHtml no longer hard-fails when DOMPurify is missing — ' +
+      'a silent raw-HTML fallback would disable the defense line unnoticed.'
+  );
+  // Worker path: blocks rendered off-thread MUST be re-sanitized on the main
+  // thread before insertion (preview-worker.js itself has no DOMPurify).
+  assert.ok(
+    js.includes('sanitizePreviewHtml(block.html'),
+    'Worker-rendered preview blocks are no longer re-sanitized on the main ' +
+      'thread before DOM insertion — worker output reaches the DOM raw.'
+  );
+  // Main-thread path: the synchronous fallback renderer sanitizes too.
+  // The needle must include the assignment: a bare `sanitizePreviewHtml(html)`
+  // also matches the DECLARATION `function sanitizePreviewHtml(html) {`,
+  // which made this assertion vacuous — it would pass forever even with the
+  // call site gone.
+  assert.ok(
+    js.includes('const sanitizedHtml = sanitizePreviewHtml('),
+    'Main-thread render path no longer sanitizes the marked output before ' +
+      'committing it to the preview.'
+  );
 });

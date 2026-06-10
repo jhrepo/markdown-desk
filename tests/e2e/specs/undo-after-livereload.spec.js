@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { installTabSessionWriteFreeze } from '../helpers/session.js';
 
 // CHARACTERIZATION / TRIPWIRE — undo after a live reload.
 //
@@ -39,13 +40,10 @@ describe('라이브 리로드 후 undo (알려진 한계 — tripwire)', () => {
       localStorage.setItem('markdownViewerActiveTab', id);
       localStorage.setItem('markdown-desk-watched-paths', JSON.stringify([path]));
       localStorage.setItem('bridge-tab-paths', JSON.stringify({ [id]: path }));
-      // PERF-008 beforeunload tab-flush would clobber the seed on reload.
-      const origSet = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (k, v) {
-        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
-        return origSet.call(this, k, v);
-      };
     }, content, file);
+    // PERF-008 beforeunload tab-flush would clobber the seed on reload
+    // (see helpers/session.js for the mechanism).
+    await browser.execute(installTabSessionWriteFreeze);
     await browser.execute(() => window.location.reload());
     await browser.pause(2500);
   }
@@ -71,7 +69,10 @@ describe('라이브 리로드 후 undo (알려진 한계 — tripwire)', () => {
     );
 
     // Let the custom-history typing timeout (~1000ms) commit the pending state
-    // so an undo entry exists for the live-reload edit.
+    // so an undo entry exists for the live-reload edit. This pause CANNOT be
+    // a waitUntil: the per-tab undo stack is closure-private inside the
+    // submodule (no DOM/global reflects the commit), so there is nothing to
+    // poll — the fixed margin over the 1000ms timeout is the only handle.
     await browser.pause(1300);
 
     const undoBtn = await $('[data-md-action="undo"]');
@@ -81,7 +82,22 @@ describe('라이브 리로드 후 undo (알려진 한계 — tripwire)', () => {
       const b = document.querySelector('[data-md-action="undo"]');
       if (b) b.click();
     });
-    await browser.pause(400);
+    // Poll for the undo to land instead of a fixed settle: on a slow runner
+    // a fixed pause could read the editor mid-transition and fail with a
+    // misleading "behavior changed" diff. Timing out here states precisely
+    // that undo never produced the expected pre-reload content.
+    await browser.waitUntil(
+      async () => {
+        const v = await browser.execute(() =>
+          document.getElementById('markdown-editor')?.value || '');
+        return v.trim() === A.trim();
+      },
+      {
+        timeout: 5000,
+        timeoutMsg:
+          'undo did not restore the pre-reload content (characterized behavior changed — see file header)',
+      }
+    );
 
     const afterUndo = await browser.execute(() =>
       document.getElementById('markdown-editor')?.value || '');

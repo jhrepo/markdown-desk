@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { installTabSessionWriteFreeze } from '../helpers/session.js';
 
 // Large-document live reload + preview-worker pipeline (Markdown-Viewer 3.7.x).
 //
@@ -64,15 +65,10 @@ describe('대용량 문서 라이브 리로드 + preview-worker 파이프라인'
       const m = {};
       list.forEach((t, i) => { m[t.id] = paths[i]; });
       localStorage.setItem('bridge-tab-paths', JSON.stringify(m));
-      // Markdown-Viewer 3.7.x (PERF-008) flushes in-memory tabs to
-      // markdownViewerTabs on beforeunload; freeze tab-session writes so the
-      // imminent reload doesn't clobber the seed. (Discarded by the reload.)
-      const origSet = Storage.prototype.setItem;
-      Storage.prototype.setItem = function (k, v) {
-        if (k === 'markdownViewerTabs' || k === 'markdownViewerActiveTab') return;
-        return origSet.call(this, k, v);
-      };
     }, seedTabs, watchedPaths);
+    // Keep the seed from being clobbered by the submodule's beforeunload
+    // flush on the reload below (see helpers/session.js for the mechanism).
+    await browser.execute(installTabSessionWriteFreeze);
     await browser.execute(() => window.location.reload());
     await browser.pause(2500);
   }

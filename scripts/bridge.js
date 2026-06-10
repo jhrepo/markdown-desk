@@ -249,10 +249,26 @@
     // visibility/focus regain reflects it without requiring a tab switch.
     // (NSAppSleepDisabled in Info.plist keeps live updates flowing while the
     // window is merely visible-but-not-focused; this covers the hidden cases.)
+    // Un-minimizing fires visibilitychange AND focus back-to-back; calling
+    // refreshActiveFromDisk from both doubles the disk read + eval on every
+    // restore (js_update_tab's unchanged no-op keeps it harmless, but the
+    // I/O is pure waste). The flag collapses duplicates while it is set;
+    // the setTimeout(…, 0) reset is BEST-EFFORT, not a guarantee — the two
+    // events arrive as separate tasks, so the timer may fire between them.
+    // If it does, the second call degrades to the old harmless double read.
+    var refreshQueued = false;
+    function queueRefreshActiveFromDisk() {
+      if (refreshQueued) return;
+      refreshQueued = true;
+      setTimeout(function () {
+        refreshQueued = false;
+        refreshActiveFromDisk();
+      }, 0);
+    }
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) refreshActiveFromDisk();
+      if (!document.hidden) queueRefreshActiveFromDisk();
     });
-    window.addEventListener('focus', refreshActiveFromDisk);
+    window.addEventListener('focus', queueRefreshActiveFromDisk);
 
     // Fix mermaid zoom modal SVG sizing for WKWebView
     // WKWebView resolves SVG width:auto to 0 inside flex containers
@@ -608,6 +624,8 @@
     // the reset actually clears the tabs. Scoped to those keys so the
     // globalState/dismissed restores above (and any other write) still persist;
     // the override dies with the page on reload.
+    // (tests/e2e/helpers/session.js carries a self-contained copy of this
+    // freeze for spec seeding — keep the suppressed-key lists in sync.)
     try {
       var origSetItem = Storage.prototype.setItem;
       Storage.prototype.setItem = function (k, v) {
@@ -624,7 +642,15 @@
     // reload regardless of resolve/reject so a failed IPC can't strand Reset.
     var reload = function () { window.location.reload(); };
     if (window.__TAURI_INTERNALS__) {
-      window.__TAURI_INTERNALS__.invoke('reset_watcher').then(reload, reload);
+      // then(reload, reload) covers resolve and reject, but a promise that
+      // never settles would strand the page mid-Reset with the setItem
+      // suppression above still installed. No known trigger (Tauri rejects
+      // even unregistered commands), so this timeout is purely defensive:
+      // reload regardless after 1s. reload() is idempotent here — whichever
+      // fires first wins, the page dies either way.
+      var fallback = setTimeout(reload, 1000);
+      var settled = function () { clearTimeout(fallback); reload(); };
+      window.__TAURI_INTERNALS__.invoke('reset_watcher').then(settled, settled);
     } else {
       reload();
     }
@@ -977,10 +1003,17 @@
     }));
   }
   document.addEventListener('keydown', function(e) {
-    if ((e.metaKey || e.ctrlKey) && (e.key === 't' || e.key === 'w')) {
+    // Lowercase the key: Caps Lock yields 'T'/'W' with shiftKey false, which
+    // an exact === 't' match silently ignored. Shift/Alt chords are excluded
+    // on purpose — Cmd+Shift+T is reopen-closed-tab by browser convention,
+    // not new-tab, and the synthetic re-dispatch above carries Alt+Shift so
+    // the exclusion also makes recursion structurally impossible.
+    if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+    var key = e.key.toLowerCase();
+    if (key === 't' || key === 'w') {
       e.preventDefault();
       e.stopPropagation();
-      bridgeForwardDesktopShortcut(e.key);
+      bridgeForwardDesktopShortcut(key);
     }
   }, true);
 
