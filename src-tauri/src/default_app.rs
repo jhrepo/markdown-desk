@@ -78,6 +78,43 @@ pub fn set_as_default_md_handler(_bundle_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    // Test-only Launch Services binding: resolve a bundle id to installed app
+    // URLs. Used as a precondition probe — LSSetDefaultRoleHandlerForContentType
+    // returns 0 even for a bundle id that is NOT registered in the LS database
+    // (the preference is recorded but has no effect), so a set→check round-trip
+    // is only meaningful on a machine where the app is actually registered
+    // (dev machines). On CI runners the app is not installed and the round-trip
+    // can never succeed regardless of our code being correct.
+    #[cfg(target_os = "macos")]
+    extern "C" {
+        fn LSCopyApplicationURLsForBundleIdentifier(
+            bundle_id: CFStringRef,
+            out_error: *mut std::ffi::c_void,
+        ) -> *const std::ffi::c_void; // CFArrayRef (create rule — must release)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn bundle_registered(bundle_id: &str) -> bool {
+        let cf = CFString::new(bundle_id);
+        let arr = unsafe {
+            LSCopyApplicationURLsForBundleIdentifier(
+                cf.as_concrete_TypeRef(),
+                std::ptr::null_mut(),
+            )
+        };
+        if arr.is_null() {
+            return false;
+        }
+        unsafe { core_foundation::base::CFRelease(arr) };
+        true
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn bundle_registered_false_for_unknown_bundle() {
+        assert!(!bundle_registered("com.nonexistent.app.12345"));
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn is_default_handler_returns_bool() {
@@ -108,6 +145,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn set_then_check_default_handler() {
+        // Round-trip guards a real regression class: a UTI or role mismatch
+        // between set_as_default_md_handler and is_default_md_handler would
+        // make set succeed but check fail. It can only hold where the app is
+        // registered with Launch Services (see bundle_registered above) — on
+        // CI runners it is not installed, so skip rather than assert machine
+        // state we cannot create.
+        if !bundle_registered("com.markdowndesk.app") {
+            eprintln!("skip: com.markdowndesk.app not registered with Launch Services");
+            return;
+        }
         let _ = set_as_default_md_handler("com.markdowndesk.app");
         assert!(is_default_md_handler("com.markdowndesk.app"));
     }
