@@ -955,6 +955,35 @@
     }
   }, true);
 
+  // Cmd+T → new tab, Cmd+W → close active tab.
+  // Markdown-Viewer 3.7.3 gates these bindings behind `typeof Neutralino !==
+  // 'undefined'` (upstream's own Neutralino desktop shell), so they are dead
+  // in the Tauri WebView; only the web bindings (Alt+Shift+T/W) survive.
+  // Stubbing a fake window.Neutralino would un-gate them, but script.js also
+  // CALLS Neutralino APIs (os.showSaveDialog, filesystem.*) on other paths —
+  // a bare stub trades dead shortcuts for runtime TypeErrors. Instead,
+  // intercept Cmd+T/W and re-dispatch them as the web bindings the submodule
+  // handles unconditionally. The synthetic event carries altKey, not meta,
+  // so it cannot re-enter this handler. Pinned by lib.rs
+  // cmd_t_and_w_forward_to_submodule_web_bindings and the upstream half in
+  // tests/unit/submodule-contract.test.mjs.
+  function bridgeForwardDesktopShortcut(key) {
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: key,
+      altKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true
+    }));
+  }
+  document.addEventListener('keydown', function(e) {
+    if ((e.metaKey || e.ctrlKey) && (e.key === 't' || e.key === 'w')) {
+      e.preventDefault();
+      e.stopPropagation();
+      bridgeForwardDesktopShortcut(e.key);
+    }
+  }, true);
+
   // ---- Webview zoom (Cmd/Ctrl +/-/0 and trackpad pinch / Ctrl+wheel) ----
   // Tauri WKWebView ships with browser-default zoom bindings disabled, so
   // we intercept the inputs and call core:webview:set-webview-zoom. The

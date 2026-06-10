@@ -24,6 +24,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -339,4 +340,96 @@ test('prepare-frontend.sh bundles every worker .js the submodule loads at runtim
       `on large docs). Fix: add \`cp "$SUBMODULE_DIR/<file>" "$FRONTEND_DIR/"\` ` +
       `to prepare-frontend.sh.`
   );
+});
+
+// ---------------- inline-handler/CSP contract (prepare-frontend.sh → dist) ----------------
+// Tauri injects our CSP via response headers and appends hash sources for its
+// own init scripts. Per the CSP spec, hash/nonce sources invalidate
+// 'unsafe-inline', so EVERY inline event handler attribute in dist/index.html
+// is blocked in the WebView (script-src-attr violation) — silently.
+// Markdown-Viewer 3.7.3 loads the bootstrap-icons CSS exclusively through one:
+//   <link rel="preload" as="style" onload="this.onload=null;this.rel='stylesheet'">
+// (its plain <link> twin sits inside <noscript>, which never applies in the
+// JS-enabled WebView). The onload never fires, rel stays "preload", the icon
+// font never loads, and every toolbar/UI glyph renders as a missing-glyph box
+// while the rest of the app keeps working. prepare-frontend.sh must rewrite
+// preload+onload style links into plain stylesheet links at build time.
+// These tests run the REAL script and assert on the REAL dist output, so a
+// submodule bump that changes the link's attribute order (defeating the
+// rewrite) fails here — not in production. (Regression origin: v26.6.1.)
+
+let distIndexCache = null;
+function distIndexHtml() {
+  if (distIndexCache === null) {
+    execFileSync('bash', [PREPARE_FRONTEND], { cwd: REPO_ROOT, stdio: 'pipe' });
+    distIndexCache = readFileSync(resolve(REPO_ROOT, 'dist', 'index.html'), 'utf8');
+  }
+  return distIndexCache;
+}
+
+test('dist/index.html carries no inline event handlers (the WebView CSP blocks them all)', () => {
+  const offenders = [...distIndexHtml().matchAll(/<[^>]*\son[a-z]+\s*=[^>]*>/gi)].map(
+    (m) => m[0].slice(0, 160)
+  );
+  assert.deepEqual(
+    offenders,
+    [],
+    `dist/index.html still contains inline event handler attribute(s); the ` +
+      `WebView CSP silently blocks every one of them (script-src-attr). ` +
+      `Extend the rewrite in scripts/prepare-frontend.sh to cover these tags.`
+  );
+});
+
+test('dist/index.html loads bootstrap-icons via a plain stylesheet link (not preload+onload)', () => {
+  // Strip <noscript> twins first — they never apply in the JS-enabled WebView,
+  // so a stylesheet link found only there is still a broken icon font.
+  const html = distIndexHtml().replace(/<noscript>[\s\S]*?<\/noscript>/gi, '');
+  const links = [...html.matchAll(/<link\b[^>]*bootstrap-icons[^>]*>/gi)].map((m) => m[0]);
+  assert.ok(
+    links.length >= 1,
+    'bootstrap-icons <link> disappeared from dist/index.html entirely — the ' +
+      'prepare-frontend.sh rewrite must transform the link, never drop it.'
+  );
+  // A link still carrying onload= is NOT a live stylesheet, even though its
+  // handler body contains the literal `this.rel='stylesheet'` — exclude those
+  // before matching, or the broken preload link false-passes this test.
+  const live = links.filter((l) => !/\bonload\s*=/.test(l));
+  assert.ok(
+    live.some((l) => /\srel=(["'])stylesheet\1/.test(l)),
+    `bootstrap-icons is not loaded as a live stylesheet in dist/index.html.\n` +
+      `  Found: ${JSON.stringify(links)}\n` +
+      `  The preload+onload upgrade path is CSP-dead in the WebView; ` +
+      `prepare-frontend.sh must rewrite it to rel="stylesheet".`
+  );
+});
+
+// ---------------- desktop-shortcut contract (script.js ⇄ bridge.js shim) ----------------
+// 3.7.3 gates its Ctrl/Cmd+T (new tab) and Ctrl/Cmd+W (close tab) bindings
+// behind `typeof Neutralino !== 'undefined'` — upstream's own Neutralino
+// desktop shell. The Tauri WebView has no Neutralino global, so those gated
+// bindings are permanently dead here; bridge.js compensates by intercepting
+// Cmd+T/W and re-dispatching the WEB bindings (Alt+Shift+T/W) the submodule
+// handles unconditionally. This pins both halves of that assumption:
+//  - the gate still exists (if upstream un-gates Cmd+T/W, the bridge shim
+//    becomes redundant double-handling — remove it together with this pin);
+//  - the Alt+Shift web bindings still exist (if upstream renames them, the
+//    shim re-dispatches into the void and the shortcuts die silently again).
+
+test('script.js still gates Cmd+T/W behind Neutralino and keeps the Alt+Shift web bindings', () => {
+  const js = readSubmoduleFile(SCRIPT_JS, 'script.js');
+  assert.match(
+    js,
+    /const isDesktop = typeof Neutralino !== 'undefined'/,
+    'Submodule no longer gates desktop shortcuts behind Neutralino. ' +
+      'If upstream un-gated Cmd+T/W, the bridge.js Cmd+T/W shim now ' +
+      'double-handles them — remove the shim and this pin together.'
+  );
+  for (const key of ['t', 'w']) {
+    assert.ok(
+      js.includes(`e.altKey && e.shiftKey && e.key.toLowerCase() === "${key}"`),
+      `Submodule dropped/renamed the Alt+Shift+${key.toUpperCase()} web binding ` +
+        `that bridge.js's Cmd+${key.toUpperCase()} shim re-dispatches to — ` +
+        `the shortcut is silently dead again. Update the shim and this pin.`
+    );
+  }
 });

@@ -27,6 +27,23 @@ cp -r "$SUBMODULE_DIR/assets" "$FRONTEND_DIR/" 2>/dev/null || true
 # they are PWA niceties that are inert/guarded inside the Tauri shell.
 cp "$SUBMODULE_DIR/preview-worker.js" "$FRONTEND_DIR/"
 
+# Rewrite preload+onload style links into plain stylesheet links.
+# Markdown-Viewer 3.7.3 loads the bootstrap-icons CSS exclusively via
+#   <link rel="preload" as="style" onload="this.onload=null;this.rel='stylesheet'">
+# (its plain twin sits in <noscript>, which never applies in the JS-enabled
+# WebView). Tauri injects our CSP through response headers and appends hash
+# sources for its own init scripts; per the CSP spec, hash sources invalidate
+# 'unsafe-inline', so the inline onload is blocked (script-src-attr) and the
+# link never upgrades — the icon font silently never loads and every toolbar
+# glyph renders as a missing-glyph box. The guard is `rel="preload"` +
+# `as="style"` + `onload=` so plain preload hints (styles.css/script.js)
+# are untouched. tests/unit/submodule-contract.test.mjs pins the rewritten
+# output (zero inline handlers in dist/index.html); if upstream reorders the
+# attributes and this sed stops matching, that test fails — not production.
+sed -i '' -E \
+  's|<link rel="preload"([^>]*) as="style"([^>]*) onload="[^"]*">|<link rel="stylesheet"\1\2>|g' \
+  "$FRONTEND_DIR/index.html"
+
 # Copy bridge script and inject app version
 cp "$SCRIPT_DIR/bridge.js" "$FRONTEND_DIR/"
 cp "$SCRIPT_DIR/bridge-helpers.js" "$FRONTEND_DIR/"

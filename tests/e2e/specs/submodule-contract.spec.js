@@ -180,4 +180,37 @@ describe('서브모듈 동작 계약 (live-reload 메커니즘 + DOM)', () => {
     expect(shape.activeCount).toBe(1);
     expect(shape.hasTitle).toBe(true);
   });
+
+  it('bootstrap-icons 폰트가 실제로 로드된다 (아이콘 글리프 계약)', async () => {
+    // 3.7.3 loads the icon CSS only via <link rel="preload" onload="…"> whose
+    // inline handler the WebView CSP blocks (script-src-attr) — so the link
+    // never upgrades to a stylesheet and every toolbar glyph renders as a
+    // missing-glyph box while everything else keeps working.
+    // prepare-frontend.sh rewrites that link to a plain stylesheet link at
+    // build time; this pins the result end-to-end in the running WebView.
+    // (Static counterpart: tests/unit/submodule-contract.test.mjs dist tests.)
+    const linkOk = await browser.execute(
+      () =>
+        !!document.querySelector('link[rel="stylesheet"][href*="bootstrap-icons"]')
+    );
+    expect(linkOk).toBe(true);
+
+    // The font face must actually become available, not just be referenced.
+    // No async execute here (the webdriver plugin returns null for promises):
+    // kick load() fire-and-forget and poll check() until the face is usable.
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          try {
+            document.fonts.load('16px bootstrap-icons');
+          } catch (e) {}
+          return document.fonts.check('16px bootstrap-icons');
+        }),
+      {
+        timeout: 10000,
+        timeoutMsg:
+          'bootstrap-icons font never became available — icon glyphs are broken (CSP/preload rewrite rotted?)',
+      }
+    );
+  });
 });

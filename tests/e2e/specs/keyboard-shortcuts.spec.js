@@ -57,4 +57,50 @@ describe('키보드 단축키', () => {
       }, preGlobal);
     }
   });
+
+  it('Cmd+T 는 새 탭을 열고 Cmd+W 는 그 탭을 닫는다 (Neutralino 게이트 우회 셰임)', async () => {
+    // Markdown-Viewer 3.7.3 gates Ctrl/Cmd+T/W behind `typeof Neutralino`
+    // (upstream's desktop shell) — dead in the Tauri WebView. bridge.js
+    // intercepts Cmd+T/W and re-dispatches the ungated web bindings
+    // (Alt+Shift+T/W). This asserts the full path end-to-end via the
+    // observable side effect: the tab count. Net tab count is zero after
+    // the test (Cmd+W closes the tab Cmd+T opened), so it leaves no state.
+    const tabCount = () =>
+      browser.execute(
+        () => document.querySelectorAll('#tab-list .tab-item').length
+      );
+    const before = await tabCount();
+
+    await browser.execute(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 't',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    });
+    await browser.waitUntil(async () => (await tabCount()) === before + 1, {
+      timeout: 5000,
+      timeoutMsg:
+        'Cmd+T did not open a new tab — the bridge.js Neutralino-gate shim is broken',
+    });
+
+    await browser.execute(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'w',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    });
+    await browser.waitUntil(async () => (await tabCount()) === before, {
+      timeout: 5000,
+      timeoutMsg:
+        'Cmd+W did not close the active tab — the bridge.js Neutralino-gate shim is broken',
+    });
+  });
 });

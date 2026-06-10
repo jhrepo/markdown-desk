@@ -504,6 +504,33 @@ mod bridge_script_tests {
     }
 
     #[test]
+    fn cmd_t_and_w_forward_to_submodule_web_bindings() {
+        // Markdown-Viewer 3.7.3 gates its Ctrl/Cmd+T (new tab) and Ctrl/Cmd+W
+        // (close tab) bindings behind `typeof Neutralino !== 'undefined'` —
+        // upstream's own Neutralino desktop shell. The Tauri WebView has no
+        // Neutralino global, so those bindings are permanently dead here.
+        // A `window.Neutralino = {}` stub is NOT an option: script.js also
+        // CALLS Neutralino APIs (os.showSaveDialog, filesystem.*) on other
+        // paths, so a bare stub trades dead shortcuts for runtime TypeErrors.
+        // Instead bridge.js intercepts Cmd+T/W and re-dispatches them as the
+        // submodule's ungated WEB bindings (Alt+Shift+T / Alt+Shift+W).
+        // The matching upstream pin lives in
+        // tests/unit/submodule-contract.test.mjs (gate + web bindings exist).
+        let s = bridge_js();
+        assert!(s.contains("e.key === 't'"), "Cmd+T key check missing");
+        assert!(s.contains("e.key === 'w'"), "Cmd+W key check missing");
+        let body = slice_fn_body(&s, "bridgeForwardDesktopShortcut");
+        assert!(
+            body.contains("new KeyboardEvent('keydown'"),
+            "shim must re-dispatch a synthetic keydown the submodule handles"
+        );
+        assert!(
+            body.contains("altKey: true") && body.contains("shiftKey: true"),
+            "shim must target the submodule's Alt+Shift web bindings"
+        );
+    }
+
+    #[test]
     fn hard_reload_resets_rust_watcher_state() {
         let s = bridge_js();
         // Reset button + Cmd+R both route through hardReload(). Clearing
